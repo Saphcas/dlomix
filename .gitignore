@@ -1,3 +1,7 @@
+# Ignore parquet files
+/prospect_data/Thermo_SRM_Pool/
+/prospect_data/Thermo_SRM_Pool_meta_data.parquet
+
 # Ignore VSCode folder
 .vscode/
 
