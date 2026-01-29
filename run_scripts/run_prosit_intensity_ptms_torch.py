@@ -2,6 +2,7 @@
     To run this script, use the following command:
     DLOMIX_BACKEND=torch python run_scripts/run_prosit_intensity_ptms_torch.py
 """
+from dlomix.data.dataset import load_processed_dataset
 
 import logging
 
@@ -37,9 +38,15 @@ model = PrositIntensityPredictor(
 optimizer = torch.optim.Adam(params=model.parameters(), lr=0.0001)
 
 TRAIN_DATAPATH = "example_dataset/intensity/third_pool_processed_sample.parquet"
+#TRAIN_DATAPATH = "prospect_data/train_dataset.parquet"
+#VAL_DATAPATH = "prospect_data/val_dataset.parquet"
+#TEST_DATAPATH = "prospect_data/test_dataset.parquet"
 
 d = FragmentIonIntensityDataset(
     data_source=TRAIN_DATAPATH,
+    #data_source=TRAIN_DATAPATH,
+    #val_data_source=VAL_DATAPATH,
+    #test_data_source=TEST_DATAPATH,
     max_seq_len=32,
     batch_size=BATCH_SIZE,
     val_ratio=0.2,
@@ -49,9 +56,13 @@ d = FragmentIonIntensityDataset(
     features_to_extract=["mod_loss", "delta_mass"],
     dataset_type="pt",
     with_termini=True,
+    encoding_scheme="naive-mods" # Was missing in original code, setting encoding scheme to naive-mods is what allows modification to exists (default is Un-modified (UNMOD))
 )
 
 print(d)
+
+# If this can work there's no need for pre-processing
+#d = load_processed_dataset("prospect_data/processed")
 
 loss_criterion = masked_spectral_distance
 

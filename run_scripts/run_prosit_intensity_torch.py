@@ -36,10 +36,14 @@ model = PrositIntensityPredictor(
 
 optimizer = torch.optim.Adam(params=model.parameters(), lr=0.0001)
 
-TRAIN_DATAPATH = "example_dataset/intensity/third_pool_processed_sample.parquet"
+TRAIN_DATAPATH = "prospect_data/train_dataset.parquet"
+VAL_DATAPATH = "prospect_data/val_dataset.parquet"
+TEST_DATAPATH = "prospect_data/test_dataset.parquet"
 
 d = FragmentIonIntensityDataset(
     data_source=TRAIN_DATAPATH,
+    val_data_source=VAL_DATAPATH,
+    test_data_source=TEST_DATAPATH,
     max_seq_len=30,
     batch_size=BATCH_SIZE,
     val_ratio=0.2,
