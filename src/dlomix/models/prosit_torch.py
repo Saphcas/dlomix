@@ -147,6 +147,7 @@ class PrositIntensityPredictor(nn.Module):
         input_keys=None,
         meta_data_keys=None,
         with_termini=True,
+        uncertainty_aware=False, # Added to switch between one or three regressors
     ):
         super(PrositIntensityPredictor, self).__init__()
 
@@ -160,6 +161,7 @@ class PrositIntensityPredictor(nn.Module):
         self.use_prosit_ptm_features = use_prosit_ptm_features
         self.input_keys = input_keys
         self.meta_data_keys = meta_data_keys
+        self.uncertainty_aware = uncertainty_aware
 
         # maximum number of fragment ions
         self.max_ion = self.seq_length - 1
@@ -192,15 +194,49 @@ class PrositIntensityPredictor(nn.Module):
         if self.meta_data_keys:
             self.meta_data_fusion_layer = MetaDataFusionBlock(max_ion=self.max_ion)
 
-        self.regressor = nn.Sequential(
-            OrderedDict(
-                [
-                    ("time_dense", nn.LazyLinear(out_features=len_fion)),
-                    ("activation", nn.LeakyReLU()),
-                    ("output", nn.Flatten()),
-                ]
+        # Possibly add if statement with a uncertainty tag to keep function of old loss functions.
+        # i.e. if NOT self.uncertainty: run old regressor, else: run three regressors
+        if self.uncertainty_aware:
+            self.mean_regressor = nn.Sequential(
+                OrderedDict(
+                    [
+                        ("time_dense", nn.LazyLinear(out_features=len_fion)),
+                        ("activation", nn.Softplus()), # To ensure mean estimation is positive
+                        #("activation", nn.LeakyReLU()),
+                        ("output", nn.Flatten()),
+                    ]
+                )
             )
-        )
+
+            self.var_regressor = nn.Sequential(
+                OrderedDict(
+                    [
+                        ("time_dense", nn.LazyLinear(out_features=len_fion)),
+                        ("activation", nn.LeakyReLU()),
+                        ("output", nn.Flatten()),
+                    ]
+                )
+            )
+
+            self.missingness_regressor = nn.Sequential(
+                OrderedDict(
+                    [
+                        ("time_dense", nn.LazyLinear(out_features=len_fion)),
+                        ("activation", nn.LeakyReLU()),
+                        ("output", nn.Flatten()),
+                    ]
+                )
+            )
+        else:
+            self.regressor = nn.Sequential(
+                OrderedDict(
+                    [
+                        ("time_dense", nn.LazyLinear(out_features=len_fion)),
+                        ("activation", nn.LeakyReLU()),
+                        ("output", nn.Flatten()),
+                    ]
+                )
+            )
 
     def _build_encoders(self):
         # sequence encoder -> always present
@@ -317,7 +353,13 @@ class PrositIntensityPredictor(nn.Module):
 
         x = self.decoder(x)
 
-        x = self.regressor(x)
+        if self.uncertainty_aware:
+            x_mean = self.mean_regressor(x)
+            x_var = self.var_regressor(x)
+            x_missingness = self.missingness_regressor(x)
+            x = x_mean, x_var, x_missingness
+        else:
+            x = self.regressor(x)  # Possibly only need to turn this into three instances and add three seperate regressor creations (x_mean, x_var, x_missingness)
 
         return x
 

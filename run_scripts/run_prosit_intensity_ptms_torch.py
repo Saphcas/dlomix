@@ -10,7 +10,7 @@ import torch
 from tqdm import tqdm
 
 from dlomix.data import FragmentIonIntensityDataset
-from dlomix.losses.intensity_torch import masked_spectral_distance
+from dlomix.losses.intensity_torch import masked_spectral_distance, gaussian_nll
 from dlomix.models import PrositIntensityPredictor
 
 logging.basicConfig(
@@ -21,6 +21,7 @@ logging.basicConfig(
 
 BATCH_SIZE = 8
 N_EPOCHS = 20
+UNCERTAINTY_AWARE = False
 
 model = PrositIntensityPredictor(
     seq_length=32,
@@ -33,6 +34,7 @@ model = PrositIntensityPredictor(
         "PRECURSOR_CHARGE_KEY": "precursor_charge_onehot",
     },
     with_termini=True,
+    uncertainty_aware=UNCERTAINTY_AWARE,
 )
 
 optimizer = torch.optim.Adam(params=model.parameters(), lr=0.0001)
@@ -56,7 +58,7 @@ d = FragmentIonIntensityDataset(
     features_to_extract=["mod_loss", "delta_mass"],
     dataset_type="pt",
     with_termini=True,
-    encoding_scheme="naive-mods" # Was missing in original code, setting encoding scheme to naive-mods is what allows modification to exists (default is Un-modified (UNMOD))
+    encoding_scheme="naive-mods" # Was missing in original code, setting encoding scheme to naive-mods is what allows modifications to exist (default is Un-modified (UNMOD))
 )
 
 print(d)
@@ -64,7 +66,10 @@ print(d)
 # If this can work there's no need for pre-processing
 #d = load_processed_dataset("prospect_data/processed")
 
-loss_criterion = masked_spectral_distance
+if UNCERTAINTY_AWARE:
+    loss_criterion = gaussian_nll
+else:
+    loss_criterion = masked_spectral_distance
 
 for epoch in tqdm(range(0, N_EPOCHS)):
     epoch_loss = 0
@@ -73,11 +78,16 @@ for epoch in tqdm(range(0, N_EPOCHS)):
     for batch in d.tensor_train_data:
         optimizer.zero_grad()
 
-        # output = model(batch["modified_sequence"])
-        output = model(batch)
-        # print("output: ", output)
-        # print("label: ", batch["intensities_raw"])
-        loss = loss_criterion(batch["intensities_raw"], output)
+        if UNCERTAINTY_AWARE:
+            output_mean, output_var, output_missingness = model(batch)
+            loss = loss_criterion(batch["intensities_raw"], output_mean, output_var, output_missingness)
+        else:
+            # output = model(batch["modified_sequence"])
+            output = model(batch)
+            # print("output: ", output)
+            # print("label: ", batch["intensities_raw"])
+            loss = loss_criterion(batch["intensities_raw"], output)
+        
         # print(loss.item())
         epoch_loss += loss.item()
 
@@ -96,12 +106,18 @@ for epoch in tqdm(range(0, N_EPOCHS)):
     with torch.no_grad():
         val_data_size = len(d.tensor_val_data)
         for batch in d.tensor_val_data:
-            val_pred_cs = model(batch)
-            val_loss = loss_criterion(batch["intensities_raw"], val_pred_cs)
-            val_loss_total += val_loss.item()
+
+            if UNCERTAINTY_AWARE:
+                val_pred_cs = model(batch)
+                val_loss = loss_criterion(batch["intensities_raw"], val_pred_cs[0], val_pred_cs[1], val_pred_cs[2]) # Mean, var, missingness
+                val_loss_total += val_loss.item()
+            else:
+                val_pred_cs = model(batch)
+                val_loss = loss_criterion(batch["intensities_raw"], val_pred_cs)
+                val_loss_total += val_loss.item()
 
         avg_val_loss = val_loss_total / val_data_size
     print(f"Epoch {epoch} Summary:  Validation Loss: {avg_val_loss:.4f}")
 
-print(val_pred_cs.shape)
-print(val_pred_cs[0])
+#print(val_pred_cs.shape)
+#print(val_pred_cs[0])

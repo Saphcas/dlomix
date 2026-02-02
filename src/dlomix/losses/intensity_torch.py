@@ -91,3 +91,37 @@ def masked_pearson_correlation_distance(
     r_den = xm.std(unbiased=False) * ym.std(unbiased=False)
 
     return 1 - (r_num / r_den)
+
+
+def gaussian_nll(
+    y_true: torch.Tensor, y_mean_pred: torch.Tensor, y_var_pred: torch.Tensor, y_missingness_pred: torch.Tensor
+) -> torch.Tensor:
+    
+        # To avoid numerical instability during training on GPUs,
+    # we add a fuzzing constant epsilon of 1×10−7 to all vectors
+    epsilon = 1e-7
+
+    # in previous masking y_true = 0 will be 0, and y_true = -1 will be 0. 
+    # unlike previous methods we do not want to make y_missingness = 0 based on y_true,
+    # mask with ((y_pred + 1) * y_pred) / (y_pred + 1 + epsilon)??
+    # Or y_pred / (y_pred + 1 + epsilon)??
+    # try new masking
+
+    # Masking
+    true_masked = ((y_true + 1) * y_true) / (y_true + 1 + epsilon) # for presence
+    y_true[y_true==-1] = 0 # to allow log()
+    true_log_masked = torch.log(y_true + epsilon) # see if logic is sound
+    mean_log_masked = torch.log(y_mean_pred + epsilon)
+    var_log_masked = torch.log(y_var_pred**2 + epsilon)
+    missingness_masked = y_missingness_pred + epsilon # Might need to contain between 0 to 1
+
+    before_sum = (torch.add(torch.mul(torch.exp(-var_log_masked), torch.pow(torch.sub(true_log_masked, mean_log_masked), 2)), var_log_masked))
+    #test1 = torch.exp(-var_log_masked)
+    #test2 = torch.sub(true_log_masked, mean_log_masked)
+    #test3 = torch.pow(test2, 2)
+    #test4 = torch.mul(test1, test3)
+    #test5 = torch.add(test4, var_log_masked)
+    nll_loss = torch.sum(before_sum, 1) * (1/2) # Each batch elements loss
+    total_loss = torch.sum(nll_loss) # Sum of each batch element loss
+
+    return total_loss
