@@ -1,5 +1,7 @@
 import torch.nn as nn
 
+print(torch.cuda.is_available())
+print(torch.version.cuda)
 
 class NeuralNetwork(nn.Module):
     def __init__(self):

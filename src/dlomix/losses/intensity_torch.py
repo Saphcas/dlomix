@@ -97,7 +97,7 @@ def gaussian_nll(
     y_true: torch.Tensor, y_mean_pred: torch.Tensor, y_var_pred: torch.Tensor, y_missingness_pred: torch.Tensor
 ) -> torch.Tensor:
     
-        # To avoid numerical instability during training on GPUs,
+    # To avoid numerical instability during training on GPUs,
     # we add a fuzzing constant epsilon of 1×10−7 to all vectors
     epsilon = 1e-7
 
@@ -112,7 +112,7 @@ def gaussian_nll(
     y_true[y_true==-1] = 0 # to allow log()
     true_log_masked = torch.log(y_true + epsilon) # see if logic is sound
     mean_log_masked = torch.log(y_mean_pred + epsilon)
-    var_log_masked = torch.log(y_var_pred**2 + epsilon)
+    var_log_masked = torch.log(torch.pow(y_var_pred, 2) + epsilon)
     missingness_masked = y_missingness_pred + epsilon # Might need to contain between 0 to 1
 
     before_sum = (torch.add(torch.mul(torch.exp(-var_log_masked), torch.pow(torch.sub(true_log_masked, mean_log_masked), 2)), var_log_masked))
@@ -122,6 +122,16 @@ def gaussian_nll(
     #test4 = torch.mul(test1, test3)
     #test5 = torch.add(test4, var_log_masked)
     nll_loss = torch.sum(before_sum, 1) * (1/2) # Each batch elements loss
-    total_loss = torch.sum(nll_loss) # Sum of each batch element loss
+    total_nll_loss = torch.sum(nll_loss) # Sum of each batch element loss
+
+    y_zero_presence = torch.sub(1, missingness_masked)
+    y_larger_presence = torch.mul(missingness_masked, torch.normal(mean_log_masked, torch.abs(var_log_masked)))
+    # Try torch.where for the condition y==0, currently y_zero starts positive and y_larger can contain negative values
+    # Presumably due to log mean being negative
+    presence_pred = torch.abs(torch.where(y_true == 0, y_zero_presence, y_larger_presence)) # Should probably find better solution for negative presence predictions
+    presence_loss = - torch.sum(torch.log(presence_pred))
+    total_presence_loss = torch.sum(presence_loss)
+
+    total_loss = total_nll_loss + total_presence_loss
 
     return total_loss

@@ -21,8 +21,9 @@ logging.basicConfig(
 
 BATCH_SIZE = 8
 N_EPOCHS = 20
-UNCERTAINTY_AWARE = False
+UNCERTAINTY_AWARE = True
 
+# TODO For possible optimization, create two children instead of having the UNCERTAINTY aware if-statement within PrositIntensityPredictor
 model = PrositIntensityPredictor(
     seq_length=32,
     use_prosit_ptm_features=True,
@@ -71,6 +72,8 @@ if UNCERTAINTY_AWARE:
 else:
     loss_criterion = masked_spectral_distance
 
+
+# TODO For possible optimization, create two for-loops instead of having the UNCERTAINTY aware if-statement within one loop
 for epoch in tqdm(range(0, N_EPOCHS)):
     epoch_loss = 0
     model.train()
