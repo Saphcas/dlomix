@@ -15,7 +15,7 @@ elif _BACKEND in PYTORCH_BACKEND:
     from .chargestate_torch import ChargeStatePredictor
     from .detectability_torch import DetectabilityModel
     from .ionmob_torch import Ionmob
-    from .prosit_torch import PrositIntensityPredictor, PrositRetentionTimePredictor
+    from .prosit_torch import PrositIntensityPredictor, PrositRetentionTimePredictor, PrositIntensityUncertaintyPredictor
 
     __all__.append("Ionmob")
 
@@ -24,6 +24,7 @@ __all__.extend(
         "ChargeStatePredictor",
         "PrositRetentionTimePredictor",
         "PrositIntensityPredictor",
+        "PrositIntensityUncertaintyPredictor",
         "DetectabilityModel",
         "ChargeStatePredictor",
     ]
