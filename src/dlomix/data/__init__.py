@@ -4,6 +4,7 @@ from .detectability import DetectabilityDataset
 from .fragment_ion_intensity import FragmentIonIntensityDataset
 from .ion_mobility import IonMobilityDataset
 from .retention_time import RetentionTimeDataset
+from .streaming_parquet import StreamingFragmentIonIntensityDataset
 
 __all__ = [
     "RetentionTimeDataset",
@@ -13,4 +14,5 @@ __all__ = [
     "load_processed_dataset",
     "DetectabilityDataset",
     "IonMobilityDataset",
+    "StreamingFragmentIonIntensityDataset",
 ]
