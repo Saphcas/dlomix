@@ -1,0 +1,575 @@
+"""
+Train Prosit Intensity (PTM features) on local parquet files using PyTorch.
+
+Usage:
+  Edit `CONFIG` below, then run:
+    python run_scripts/train_prosit_intensity_ptms_torch.py
+
+Notes:
+  - This script forces the DLOmix backend to PyTorch by setting DLOMIX_BACKEND=torch
+    before importing dlomix.
+  - Uses a streaming parquet reader to avoid HuggingFace `datasets` cache materialization.
+  - Your parquet needs at least:
+      sequence column (default: modified_sequence, ProForma)
+      label column    (default: intensities_raw)
+      model features  (default: collision_energy_aligned_normed, precursor_charge_onehot)
+"""
+
+from __future__ import annotations
+
+import os
+import math
+from dataclasses import dataclass
+from pathlib import Path
+from types import SimpleNamespace
+from typing import Iterable
+
+# -----------------------------------------------------------------------------
+# Hugging Face cache bootstrap (must run BEFORE importing `datasets` / `dlomix`)
+#
+# Default behavior of `datasets` is to cache under `~/.cache/huggingface/...`.
+# For large parquet inputs this can quickly consume the user home partition.
+# We instead default to a repo-local cache under `<repo>/.hf/`, unless the user
+# already set HF_* env vars externally.
+#
+# To use a different cache location, edit `HF_CACHE_ROOT` below.
+# -----------------------------------------------------------------------------
+repo_root = Path(__file__).resolve().parent.parent
+HF_CACHE_ROOT = (repo_root / ".hf").expanduser()
+# or set HF_CACHE_ROOT = Path("/path/to/your/cache").expanduser() for a custom location
+
+hf_root = Path(os.environ.get("HF_HOME", str(HF_CACHE_ROOT))).expanduser()
+hf_datasets_cache = Path(
+    os.environ.get("HF_DATASETS_CACHE", str(hf_root / "datasets"))
+).expanduser()
+hf_hub_cache = Path(os.environ.get("HF_HUB_CACHE", str(hf_root / "hub"))).expanduser()
+
+hf_datasets_cache.mkdir(parents=True, exist_ok=True)
+hf_hub_cache.mkdir(parents=True, exist_ok=True)
+
+os.environ.setdefault("HF_HOME", str(hf_root))
+os.environ.setdefault("HF_DATASETS_CACHE", str(hf_datasets_cache))
+os.environ.setdefault("HF_HUB_CACHE", str(hf_hub_cache))
+
+os.environ.setdefault("DLOMIX_BACKEND", "torch")
+
+import torch
+from tqdm.auto import tqdm
+
+from dlomix.data import StreamingFragmentIonIntensityDataset
+from dlomix.losses.intensity_torch import masked_spectral_distance
+from dlomix.models import PrositIntensityPredictor
+
+# -----------------------------------------------------------------------------
+# Configuration
+# -----------------------------------------------------------------------------
+# (1) PROSIT: https://www.nature.com/articles/s41592-019-0426-7
+#     "Prosit: proteome-wide prediction of peptide tandem mass spectra by deep learning"
+# (2) PROSIT-PTM: https://www.biorxiv.org/content/10.1101/2025.11.07.687302v1
+#     "Learning the Unseen: Data-Augmented Deep Learning for PTM Discovery with Prosit-PTM"
+CONFIG = {
+    "train": "/Users/alfred/Datasets/Prosit_PTMs/Prosit_PTMs/PTMs_Train/all_train_ptms_fixed_na.parquet",
+    "val": "/Users/alfred/Datasets/Prosit_PTMs/Prosit_PTMs/PTMs_Train/all_val_ptms_fixed_na.parquet",
+    "test": "/Users/alfred/Datasets/Prosit_PTMs/Prosit_PTMs/PTMs_Train/test.parquet",
+    # --- Training loop (evidence: `run_scripts/run_prosit_intensity_torch.py`,
+    # `run_scripts/run_prosit_intensity_ptms_torch.py`, and TF scripts) ---
+    "epochs": 120,  # according to (2) PROSIT-PTM (FII: max 120 epochs with early stopping)
+    # "epochs": 2,  # useful for debugging
+    # "epochs": 20,  # evidence: `run_scripts/run_prosit_intensity_torch.py`, `run_scripts/run_prosit_intensity_ptms_torch.py`
+    # "epochs": 32,  # according to (1) PROSIT (paper reports 32 epochs)
+    "batch_size": 32,  # reasonable laptop default; (2) PROSIT-PTM excerpt doesn't specify FII batch size
+    # "batch_size": 8,  # evidence: PTM torch example uses 8
+    # "batch_size": 128,  # evidence: non-PTM torch example + TF PTM script use 128
+    # "batch_size": 512,  # according to (1) PROSIT (paper reports batch size 512)
+    "lr": 2e-4,  # according to (2) PROSIT-PTM (upper CLR bound; used when `use_clr=True`)
+    # "lr": 1e-4,  # evidence: all Prosit example scripts use Adam(lr=1e-4)
+    # "lr": 1e-3,  # according to (1) PROSIT (paper reports initial lr=0.001)
+    "max_seq_len": 32,  # evidence: PTM examples use 32 (non-PTM intensity uses 30)
+    # "max_seq_len": 30,  # evidence: `run_scripts/run_prosit_intensity_torch.py` (and RT scripts)
+    "shuffle": True,
+    "shuffle_buffer_size": 10_000,
+    "parquet_read_batch_size": 50_000,
+    "with_termini": True,
+    "encoding_scheme": "unmod",  # or "naive-mods"
+    "sequence_column": "modified_sequence",
+    "label_column": "intensities_raw",
+    "collision_energy_column": "collision_energy_aligned_normed",
+    "precursor_charge_column": "precursor_charge_onehot",
+    "ptm_features": "mod_loss,delta_mass",
+    "debug_unknown_tokens": False,
+    "max_train_batches": 0,  # 0 = no cap (useful to set small for debugging)
+    "max_val_batches": 0,
+    "max_test_batches": 0,
+    "save": None,
+    # --- Optional optimizer / stability knobs (evidence: repo examples) ---
+    "grad_clip_max_norm": 1.0,  # evidence: torch intensity examples clip with max_norm=1
+    # "weight_decay": 0.0,  # evidence: not used in repo examples; keep off unless you add it intentionally
+    # --- PROSIT-PTM FII schedule knobs (paper hyperparameters) ---
+    "use_clr": True,  # according to (2) PROSIT-PTM (FII uses cyclic learning rate)
+    "clr_base_lr": 1e-5,  # according to (2) PROSIT-PTM (lower lr bound)
+    "clr_max_lr": 2e-4,  # according to (2) PROSIT-PTM (upper lr bound)
+    "clr_scale_gamma": 0.95,  # according to (2) PROSIT-PTM (upper bound scaled by 0.95 every 8 epochs)
+    "clr_scale_every_epochs": 8,  # according to (2) PROSIT-PTM
+    "early_stopping_patience": 16,  # according to (2) PROSIT-PTM (stop if val doesn't improve for 16 epochs)
+    # --- Optional training control (evidence: TF examples) ---
+    # "use_reduce_on_plateau": True,  # evidence: TF Prosit scripts use ReduceLROnPlateau
+    # "reduce_factor": 0.1,  # evidence: `run_scripts/run_prosit_intensity.py`, `run_scripts/run_prosit_intensity_ptms.py`
+    # "reduce_patience": 10,  # evidence: same as above
+    # "reduce_min_lr": 0.0,  # evidence: same as above
+    # "early_stopping_patience": 20,  # evidence: same as above
+    # --- Optional model architecture overrides (evidence: constructor defaults) ---
+    # "embedding_output_dim": 16,  # evidence: `src/dlomix/models/prosit_torch.py:PrositIntensityPredictor.__init__`
+    # "dropout_rate": 0.2,  # evidence: `src/dlomix/models/prosit_torch.py:PrositIntensityPredictor.__init__`
+    "dropout_rate": 0.3,  # according to (2) PROSIT-PTM (encoder/meta/PTM dropout=0.3)
+    # "latent_dropout_rate": 0.1,  # evidence: same
+    # "recurrent_layers_sizes": (256, 512),  # evidence: same
+    # "regressor_layer_size": 512,  # evidence: same
+    # "len_fion": 6,  # evidence: same
+    # --- PROSIT-PTM architecture notes (paper hyperparameters; informational) ---
+    # "ptm_mlp_units": (1024, 64, 16),  # according to (2) PROSIT-PTM (PTM feature MLP sizes)
+    # "decoder_dropout_rate": 0.5,  # according to (2) PROSIT-PTM (decoder dropout differs from encoder dropout)
+}
+
+
+def _device_from_torch() -> torch.device:
+    if torch.cuda.is_available():
+        return torch.device("cuda")
+    if torch.backends.mps.is_available():
+        return torch.device("mps")
+    return torch.device("cpu")
+
+
+def _as_list(csv: str) -> list[str]:
+    if csv.strip() == "":
+        return []
+    return [item.strip() for item in csv.split(",") if item.strip()]
+
+
+def _move_batch_to_device(batch: dict, device: torch.device) -> dict:
+    moved = {}
+    for key, value in batch.items():
+        if torch.is_tensor(value):
+            moved[key] = value.to(device)
+        else:
+            moved[key] = value
+    return moved
+
+
+def _parquet_num_rows(parquet_path: str) -> int:
+    import pyarrow.parquet as pq
+
+    return pq.ParquetFile(parquet_path).metadata.num_rows
+
+
+def _set_optimizer_lr(optimizer: torch.optim.Optimizer, lr: float) -> None:
+    for group in optimizer.param_groups:
+        group["lr"] = lr
+
+
+def _triangular_lr(progress_0_to_1: float, base_lr: float, max_lr: float) -> float:
+    progress_0_to_1 = max(0.0, min(1.0, float(progress_0_to_1)))
+    triangle = 1.0 - abs(2.0 * progress_0_to_1 - 1.0)  # 0 -> 1 -> 0
+    return base_lr + triangle * (max_lr - base_lr)
+
+
+@dataclass(frozen=True)
+class ColumnConfig:
+    sequence: str
+    label: str
+    collision_energy: str
+    precursor_charge: str
+
+
+def _cast_batch_types(batch: dict, columns: ColumnConfig) -> dict:
+    # Embedding indices must be integer type (Long recommended).
+    if columns.sequence in batch and torch.is_tensor(batch[columns.sequence]):
+        batch[columns.sequence] = batch[columns.sequence].to(dtype=torch.long)
+
+    # Labels and numeric features should be floating for loss/MLP layers.
+    float_keys: Iterable[str] = [
+        columns.label,
+        columns.collision_energy,
+        columns.precursor_charge,
+        # PTM features (if present)
+        "mod_loss",
+        "delta_mass",
+        "mod_gain",
+        "atom_count",
+        "red_smiles",
+    ]
+    for key in float_keys:
+        if key in batch and torch.is_tensor(batch[key]):
+            batch[key] = batch[key].to(dtype=torch.float32)
+
+    return batch
+
+
+def _print_ptm_handling_probe(
+    *,
+    parquet_path: str,
+    sequence_column: str,
+    with_termini: bool,
+    encoding_scheme: str,
+    ptm_features: list[str],
+    probe_rows: int = 256,
+) -> None:
+    """
+    Best-effort, low-cost probe showing how PTMs flow through:
+    - parsed ProForma tokens
+    - (optional) UNMOD PTM stripping step
+    - PTM feature lookup coverage for requested `features_to_extract`
+    """
+    try:
+        import pyarrow.parquet as pq
+
+        from dlomix.constants import ALPHABET_UNMOD
+        from dlomix.data.processing.feature_extractors import (
+            FEATURE_EXTRACTORS_PARAMETERS,
+        )
+        from dlomix.data.processing.processors import (
+            SequenceParsingProcessor,
+            SequencePTMRemovalProcessor,
+        )
+    except Exception as exc:
+        print(f"[ptm-probe] skipped (missing deps): {exc}")
+        return
+
+    try:
+        pf = pq.ParquetFile(parquet_path)
+        rb = next(
+            pf.iter_batches(batch_size=probe_rows, columns=[sequence_column]),
+            None,
+        )
+        if rb is None:
+            print("[ptm-probe] skipped (empty parquet)")
+            return
+        batch = rb.to_pydict()
+    except Exception as exc:
+        print(f"[ptm-probe] skipped (failed reading parquet): {exc}")
+        return
+
+    parser = SequenceParsingProcessor(
+        sequence_column_name=sequence_column, batched=True, with_termini=with_termini
+    )
+    batch = parser(batch)
+
+    print(
+        f"[ptm-probe] config: encoding_scheme={encoding_scheme} with_termini={with_termini} probe_rows={probe_rows}"
+    )
+
+    parsed_tokens: list[str] = []
+    for n_term, seq, c_term in zip(
+        batch["_n_term_mods"], batch["_parsed_sequence"], batch["_c_term_mods"]
+    ):
+        parsed_tokens.extend([n_term, *seq, c_term])
+
+    parsed_unimod_tokens = sorted({t for t in parsed_tokens if "UNIMOD:" in t})
+    parsed_unimod_residue = sorted(
+        {t for t in parsed_unimod_tokens if len(t) > 0 and t[0].isalpha()}
+    )
+    parsed_unimod_termini = sorted(
+        {t for t in parsed_unimod_tokens if not (len(t) > 0 and t[0].isalpha())}
+    )
+
+    print(
+        "[ptm-probe] observed UNIMOD tokens (raw parse): "
+        f"total={len(parsed_unimod_tokens)} residues={len(parsed_unimod_residue)} termini={len(parsed_unimod_termini)}"
+    )
+    print(f"[ptm-probe] UNIMOD sample: {parsed_unimod_tokens[:10]}")
+
+    if encoding_scheme == "unmod":
+        remover = SequencePTMRemovalProcessor(
+            sequence_column_name=sequence_column, batched=True
+        )
+        removed = remover(batch)
+        # remover returns only {sequence_column: ...}
+        batch.update(removed)
+
+        seq_tokens = []
+        for seq in batch[sequence_column]:
+            seq_tokens.extend(seq)
+        remaining_unimod = sorted({t for t in seq_tokens if "UNIMOD:" in t})
+        alphabet_unimod = sorted([k for k in ALPHABET_UNMOD.keys() if "UNIMOD:" in k])
+        unknown_in_alphabet = sorted(
+            [t for t in remaining_unimod if t not in ALPHABET_UNMOD]
+        )
+        print(
+            "[ptm-probe] embedded-seq UNIMOD tokens after UNMOD stripping: "
+            f"count={len(remaining_unimod)} tokens={remaining_unimod}"
+        )
+        print(
+            f"[ptm-probe] ALPHABET_UNMOD supports UNIMOD tokens: count={len(alphabet_unimod)} tokens={alphabet_unimod}"
+        )
+        if unknown_in_alphabet:
+            print(
+                f"[ptm-probe] NOTE: embedded-seq UNIMOD tokens not in ALPHABET_UNMOD (will become unknown X): {unknown_in_alphabet}"
+            )
+    else:
+        print(
+            "[ptm-probe] embedded-seq tokens: PTMs preserved (encoding_scheme=naive-mods)"
+        )
+
+    # Feature lookup coverage (for residue/PTM tokens primarily)
+    residue_unimod = parsed_unimod_residue
+    for feat in ptm_features:
+        feat = feat.lower()
+        params = FEATURE_EXTRACTORS_PARAMETERS.get(feat)
+        if not params:
+            continue
+        lookup = params["lookup_table"]
+        missing = [t for t in residue_unimod if t not in lookup]
+        print(
+            f"[ptm-probe] feature={feat}: residue UNIMOD tokens missing from lookup={len(missing)} of {len(residue_unimod)} (missing_sample={missing[:10]})"
+        )
+
+
+def main() -> int:
+    args = SimpleNamespace(**CONFIG)
+
+    device = _device_from_torch()
+    print(f"Using device: {device}")
+
+    columns = ColumnConfig(
+        sequence=args.sequence_column,
+        label=args.label_column,
+        collision_energy=args.collision_energy_column,
+        precursor_charge=args.precursor_charge_column,
+    )
+
+    train_path = args.train
+    val_path = args.val
+    test_path = args.test
+
+    ptm_features = _as_list(args.ptm_features)
+    model_features = [columns.collision_energy, columns.precursor_charge]
+
+    _print_ptm_handling_probe(
+        parquet_path=train_path,
+        sequence_column=columns.sequence,
+        with_termini=args.with_termini,
+        encoding_scheme=args.encoding_scheme,
+        ptm_features=ptm_features,
+    )
+
+    if val_path is None:
+        raise ValueError(
+            "Streaming mode requires an explicit --val parquet (no in-script train/val split)."
+        )
+
+    dataset = StreamingFragmentIonIntensityDataset(
+        train_path=train_path,
+        val_path=val_path,
+        test_path=test_path,
+        max_seq_len=args.max_seq_len,
+        batch_size=args.batch_size,
+        shuffle=args.shuffle,
+        shuffle_buffer_size=args.shuffle_buffer_size,
+        seed=0,
+        with_termini=args.with_termini,
+        encoding_scheme=args.encoding_scheme,
+        model_features=model_features,
+        features_to_extract=ptm_features,
+        sequence_column=columns.sequence,
+        label_column=columns.label,
+        parquet_read_batch_size=args.parquet_read_batch_size,
+        return_debug_tokens=bool(args.debug_unknown_tokens),
+    )
+
+    model = PrositIntensityPredictor(
+        seq_length=args.max_seq_len,
+        **{
+            k: getattr(args, k)
+            for k in (
+                "embedding_output_dim",
+                "dropout_rate",
+                "latent_dropout_rate",
+                "recurrent_layers_sizes",
+                "regressor_layer_size",
+                "len_fion",
+            )
+            if hasattr(args, k)
+        },
+        use_prosit_ptm_features=True,
+        input_keys={"SEQUENCE_KEY": columns.sequence},
+        meta_data_keys={
+            "COLLISION_ENERGY_KEY": columns.collision_energy,
+            "PRECURSOR_CHARGE_KEY": columns.precursor_charge,
+        },
+        with_termini=args.with_termini,
+    ).to(device)
+
+    clr_enabled = bool(getattr(args, "use_clr", False))
+    clr_base_lr = float(getattr(args, "clr_base_lr", args.lr))
+    clr_max_lr = float(getattr(args, "clr_max_lr", args.lr))
+    clr_gamma = float(getattr(args, "clr_scale_gamma", 1.0))
+    clr_every = int(getattr(args, "clr_scale_every_epochs", 0) or 0)
+
+    initial_lr = clr_base_lr if clr_enabled else float(args.lr)
+    optimizer = torch.optim.Adam(params=model.parameters(), lr=initial_lr)
+
+    grad_clip = float(getattr(args, "grad_clip_max_norm", 1.0))
+    early_patience = int(getattr(args, "early_stopping_patience", 0) or 0)
+
+    best_val_loss = float("inf")
+    best_state = None
+    epochs_without_improvement = 0
+
+    steps_per_epoch_est = None
+    if clr_enabled:
+        if args.max_train_batches:
+            steps_per_epoch_est = int(args.max_train_batches)
+        else:
+            steps_per_epoch_est = int(
+                math.ceil(_parquet_num_rows(train_path) / args.batch_size)
+            )
+
+    for epoch in range(1, args.epochs + 1):
+        model.train()
+        train_loss_total = 0.0
+        train_batches = 0
+
+        train_it = tqdm(
+            dataset.tensor_train_data,
+            total=args.max_train_batches or None,
+            desc=f"Epoch {epoch:03d} [train]",
+            unit="batch",
+            leave=False,
+        )
+        for batch in train_it:
+            batch = _move_batch_to_device(batch, device)
+            batch = _cast_batch_types(batch, columns)
+
+            optimizer.zero_grad(set_to_none=True)
+
+            if clr_enabled:
+                denom = max(1, (steps_per_epoch_est or 1) - 1)
+                progress = float(train_batches) / float(denom)
+                lr_now = _triangular_lr(progress, clr_base_lr, clr_max_lr)
+                _set_optimizer_lr(optimizer, lr_now)
+
+            pred = model(batch)
+
+            if args.debug_unknown_tokens:
+                seq = batch[columns.sequence]
+                unknown_token_index = getattr(dataset, "unknown_token_index", 23)
+                any_unknowns = (seq == unknown_token_index).sum()
+                if any_unknowns > 0:
+                    print(
+                        f"Warning: Found {any_unknowns} unknown tokens (id={unknown_token_index}) in batch sequences."
+                    )
+                    if "_debug_input_tokens" in batch:
+                        debug_tokens = batch["_debug_input_tokens"]
+                        printed = 0
+                        for ex_i in range(seq.shape[0]):
+                            pos = (seq[ex_i] == unknown_token_index).nonzero(
+                                as_tuple=False
+                            )
+                            if pos.numel() == 0:
+                                continue
+                            for p in pos.flatten().tolist():
+                                try:
+                                    tok = debug_tokens[ex_i][p]
+                                except Exception:
+                                    tok = "<unavailable>"
+                                print(f"  example={ex_i} pos={p} token={tok!r}")
+                                printed += 1
+                                if printed >= 10:
+                                    break
+                            if printed >= 10:
+                                break
+
+            loss = masked_spectral_distance(batch[columns.label], pred)
+            loss.backward()
+            if grad_clip > 0:
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=grad_clip)
+            optimizer.step()
+            train_loss_total += loss.item()
+            train_batches += 1
+            train_it.set_postfix(loss=f"{loss.item():.4f}")
+            if args.max_train_batches and train_batches >= args.max_train_batches:
+                break
+
+        avg_train_loss = train_loss_total / max(1, train_batches)
+
+        # Validation
+        model.eval()
+        val_loss_total = 0.0
+        val_batches = 0
+        with torch.no_grad():
+            val_it = tqdm(
+                dataset.tensor_val_data,
+                total=args.max_val_batches or None,
+                desc=f"Epoch {epoch:03d} [val]",
+                unit="batch",
+                leave=False,
+            )
+            for batch in val_it:
+                batch = _move_batch_to_device(batch, device)
+                batch = _cast_batch_types(batch, columns)
+                pred = model(batch)
+                val_loss = masked_spectral_distance(batch[columns.label], pred)
+                val_loss_total += val_loss.item()
+                val_batches += 1
+                val_it.set_postfix(loss=f"{val_loss.item():.4f}")
+                if args.max_val_batches and val_batches >= args.max_val_batches:
+                    break
+        avg_val_loss = val_loss_total / max(1, val_batches)
+
+        if avg_val_loss < best_val_loss:
+            best_val_loss = avg_val_loss
+            best_state = {k: v.detach().cpu() for k, v in model.state_dict().items()}
+            epochs_without_improvement = 0
+        else:
+            epochs_without_improvement += 1
+
+        print(
+            f"Epoch {epoch:03d}: train_loss={avg_train_loss:.6f} val_loss={avg_val_loss:.6f}"
+        )
+
+        if clr_enabled and clr_every > 0 and (epoch % clr_every == 0):
+            clr_max_lr *= clr_gamma
+
+        if early_patience > 0 and epochs_without_improvement >= early_patience:
+            print(
+                f"Early stopping: no val improvement for {epochs_without_improvement} epoch(s) (patience={early_patience})."
+            )
+            break
+
+    if best_state is not None:
+        model.load_state_dict(best_state)
+        if args.save:
+            os.makedirs(os.path.dirname(args.save) or ".", exist_ok=True)
+            torch.save(best_state, args.save)
+            print(f"Saved best model to: {args.save}")
+
+    # Test
+    if test_path is not None:
+        model.eval()
+        test_loss_total = 0.0
+        test_batches = 0
+        with torch.no_grad():
+            test_it = tqdm(
+                dataset.tensor_test_data,
+                total=args.max_test_batches or None,
+                desc="Test",
+                unit="batch",
+                leave=False,
+            )
+            for batch in test_it:
+                batch = _move_batch_to_device(batch, device)
+                batch = _cast_batch_types(batch, columns)
+                pred = model(batch)
+                test_loss = masked_spectral_distance(batch[columns.label], pred)
+                test_loss_total += test_loss.item()
+                test_batches += 1
+                test_it.set_postfix(loss=f"{test_loss.item():.4f}")
+                if args.max_test_batches and test_batches >= args.max_test_batches:
+                    break
+        avg_test_loss = test_loss_total / max(1, test_batches)
+        print(f"Test loss: {avg_test_loss:.6f}")
+
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
