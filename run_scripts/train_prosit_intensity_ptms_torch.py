@@ -88,11 +88,15 @@ CONFIG = {
     # "lr": 1e-3,  # according to (1) PROSIT (paper reports initial lr=0.001)
     "max_seq_len": 32,  # evidence: PTM examples use 32 (non-PTM intensity uses 30)
     # "max_seq_len": 30,  # evidence: `run_scripts/run_prosit_intensity_torch.py` (and RT scripts)
+    # --- Dataloader settings ---
     "shuffle": True,
     "shuffle_buffer_size": 10_000,
     "parquet_read_batch_size": 50_000,
-    "num_workers": 16,
+    "num_workers": 8,
     "pin_memory": True,
+    "persistent_workers": False,
+    "prefetch_factor": 1,
+    "in_order": True,
     "with_termini": True,
     "encoding_scheme": "unmod",  # or "naive-mods"
     "sequence_column": "modified_sequence",
@@ -645,10 +649,20 @@ def main() -> int:
         return_debug_tokens=bool(args.debug_unknown_tokens),
         num_workers=int(getattr(args, "num_workers", 0) or 0),
         pin_memory=bool(getattr(args, "pin_memory", False)),
+        prefetch_factor=(
+            int(getattr(args, "prefetch_factor"))
+            if getattr(args, "prefetch_factor", None) is not None
+            else None
+        ),
+        persistent_workers=bool(getattr(args, "persistent_workers", False)),
+        in_order=bool(getattr(args, "in_order", True)),
     )
     print(
         f"DataLoader config: num_workers={int(getattr(args, 'num_workers', 0) or 0)} "
-        f"pin_memory={bool(getattr(args, 'pin_memory', False))}"
+        f"pin_memory={bool(getattr(args, 'pin_memory', False))} "
+        f"persistent_workers={bool(getattr(args, 'persistent_workers', False))} "
+        f"prefetch_factor={getattr(args, 'prefetch_factor', None)} "
+        f"in_order={bool(getattr(args, 'in_order', True))}"
     )
 
     _run_dataloader_only_profile(dataset, columns, device, args)

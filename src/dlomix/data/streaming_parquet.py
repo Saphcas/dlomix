@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import random
+import inspect
 from dataclasses import dataclass
 from typing import Any, Dict, Iterable, Iterator, List, Optional, Sequence
 
@@ -251,6 +252,9 @@ class StreamingFragmentIonIntensityDataset:
         return_debug_tokens: bool = False,
         num_workers: int = 0,
         pin_memory: bool = False,
+        prefetch_factor: Optional[int] = None,
+        persistent_workers: bool = False,
+        in_order: bool = True,
     ):
         from ..constants import ALPHABET_UNMOD
 
@@ -284,6 +288,17 @@ class StreamingFragmentIonIntensityDataset:
             "num_workers": num_workers,
             "pin_memory": pin_memory,
         }
+        if num_workers > 0:
+            self._dl_kwargs["persistent_workers"] = bool(persistent_workers)
+            if prefetch_factor is not None:
+                self._dl_kwargs["prefetch_factor"] = int(prefetch_factor)
+
+            # `in_order` is available in newer torch versions only.
+            import torch.utils.data as torch_data
+
+            dl_params = inspect.signature(torch_data.DataLoader).parameters
+            if "in_order" in dl_params:
+                self._dl_kwargs["in_order"] = bool(in_order)
 
     def _iter_split(
         self,
