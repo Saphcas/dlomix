@@ -20,6 +20,7 @@ from __future__ import annotations
 import os
 import math
 import time
+from contextlib import nullcontext
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
@@ -78,7 +79,7 @@ CONFIG = {
     # "epochs": 2,  # useful for debugging
     # "epochs": 20,  # evidence: `run_scripts/run_prosit_intensity_torch.py`, `run_scripts/run_prosit_intensity_ptms_torch.py`
     # "epochs": 32,  # according to (1) PROSIT (paper reports 32 epochs)
-    "batch_size": 1024,  # reasonable laptop default; (2) PROSIT-PTM excerpt doesn't specify FII batch size
+    "batch_size": 2048,  # reasonable laptop default; (2) PROSIT-PTM excerpt doesn't specify FII batch size
     # "batch_size": 8,  # evidence: PTM torch example uses 8
     # "batch_size": 128,  # evidence: non-PTM torch example + TF PTM script use 128
     # "batch_size": 512,  # according to (1) PROSIT (paper reports batch size 512)
@@ -90,7 +91,7 @@ CONFIG = {
     "shuffle": True,
     "shuffle_buffer_size": 10_000,
     "parquet_read_batch_size": 50_000,
-    "num_workers": 8,
+    "num_workers": 16,
     "pin_memory": True,
     "with_termini": True,
     "encoding_scheme": "unmod",  # or "naive-mods"
@@ -110,6 +111,9 @@ CONFIG = {
     "torch_compile_mode": "reduce-overhead",
     "torch_compile_fullgraph": False,
     "torch_compile_dynamic": False,
+    # --- Optional mixed precision ---
+    "use_amp": True,
+    "amp_dtype": "bf16",  # bf16 | fp16 | float16 | bfloat16
     # --- Optional CUDA math acceleration ---
     "enable_tf32": True,
     "float32_matmul_precision": "high",  # one of: highest, high, medium
@@ -212,6 +216,59 @@ def _move_batch_to_device(batch: dict, device: torch.device) -> dict:
         else:
             moved[key] = value
     return moved
+
+
+def _resolve_amp_settings(
+    device: torch.device, args: SimpleNamespace
+) -> tuple[bool, torch.dtype | None, bool]:
+    if not bool(getattr(args, "use_amp", False)):
+        return False, None, False
+
+    if device.type != "cuda":
+        print("Warning: AMP requested but device is not CUDA; disabling AMP.")
+        return False, None, False
+
+    amp_dtype_name = str(getattr(args, "amp_dtype", "bf16")).lower()
+    dtype_map = {
+        "bf16": torch.bfloat16,
+        "bfloat16": torch.bfloat16,
+        "fp16": torch.float16,
+        "float16": torch.float16,
+    }
+    amp_dtype = dtype_map.get(amp_dtype_name)
+    if amp_dtype is None:
+        print(
+            f"Warning: Unsupported amp_dtype={amp_dtype_name!r}; use bf16 or fp16. Disabling AMP."
+        )
+        return False, None, False
+
+    if amp_dtype is torch.bfloat16:
+        bf16_supported = (
+            bool(hasattr(torch.cuda, "is_bf16_supported"))
+            and torch.cuda.is_bf16_supported()
+        )
+        if not bf16_supported:
+            print(
+                "Warning: CUDA bfloat16 is not supported here; falling back to fp16 AMP."
+            )
+            amp_dtype = torch.float16
+
+    use_grad_scaler = amp_dtype is torch.float16
+    return True, amp_dtype, use_grad_scaler
+
+
+def _make_grad_scaler(enabled: bool):
+    if hasattr(torch, "amp") and hasattr(torch.amp, "GradScaler"):
+        return torch.amp.GradScaler("cuda", enabled=enabled)
+    return torch.cuda.amp.GradScaler(enabled=enabled)
+
+
+def _amp_autocast_context(
+    device: torch.device, enabled: bool, dtype: torch.dtype | None
+):
+    if not enabled or dtype is None:
+        return nullcontext()
+    return torch.autocast(device_type=device.type, dtype=dtype, enabled=True)
 
 
 def _parquet_num_rows(parquet_path: str) -> int:
@@ -534,6 +591,14 @@ def main() -> int:
         except Exception as exc:
             print(f"Warning: failed to configure CUDA TF32 options: {exc}")
 
+    amp_enabled, amp_dtype, amp_use_grad_scaler = _resolve_amp_settings(device, args)
+    scaler = _make_grad_scaler(enabled=True) if amp_use_grad_scaler else None
+    if amp_enabled:
+        amp_dtype_name = "bf16" if amp_dtype is torch.bfloat16 else "fp16"
+        print(
+            f"Enabled AMP autocast with dtype={amp_dtype_name}; grad_scaler={amp_use_grad_scaler}"
+        )
+
     columns = ColumnConfig(
         sequence=args.sequence_column,
         label=args.label_column,
@@ -719,54 +784,65 @@ def main() -> int:
             if do_profile:
                 _maybe_cuda_sync(device, profile_cuda_sync)
                 t_fwd_0 = time.perf_counter()
-            pred = model(batch)
-            if do_profile:
-                _maybe_cuda_sync(device, profile_cuda_sync)
-                forward_s = time.perf_counter() - t_fwd_0
+            with _amp_autocast_context(device, amp_enabled, amp_dtype):
+                pred = model(batch)
+                if do_profile:
+                    _maybe_cuda_sync(device, profile_cuda_sync)
+                    forward_s = time.perf_counter() - t_fwd_0
 
-            if args.debug_unknown_tokens:
-                seq = batch[columns.sequence]
-                unknown_token_index = getattr(dataset, "unknown_token_index", 23)
-                any_unknowns = (seq == unknown_token_index).sum()
-                if any_unknowns > 0:
-                    print(
-                        f"Warning: Found {any_unknowns} unknown tokens (id={unknown_token_index}) in batch sequences."
-                    )
-                    if "_debug_input_tokens" in batch:
-                        debug_tokens = batch["_debug_input_tokens"]
-                        printed = 0
-                        for ex_i in range(seq.shape[0]):
-                            pos = (seq[ex_i] == unknown_token_index).nonzero(
-                                as_tuple=False
-                            )
-                            if pos.numel() == 0:
-                                continue
-                            for p in pos.flatten().tolist():
-                                try:
-                                    tok = debug_tokens[ex_i][p]
-                                except Exception:
-                                    tok = "<unavailable>"
-                                print(f"  example={ex_i} pos={p} token={tok!r}")
-                                printed += 1
+                if args.debug_unknown_tokens:
+                    seq = batch[columns.sequence]
+                    unknown_token_index = getattr(dataset, "unknown_token_index", 23)
+                    any_unknowns = (seq == unknown_token_index).sum()
+                    if any_unknowns > 0:
+                        print(
+                            f"Warning: Found {any_unknowns} unknown tokens (id={unknown_token_index}) in batch sequences."
+                        )
+                        if "_debug_input_tokens" in batch:
+                            debug_tokens = batch["_debug_input_tokens"]
+                            printed = 0
+                            for ex_i in range(seq.shape[0]):
+                                pos = (seq[ex_i] == unknown_token_index).nonzero(
+                                    as_tuple=False
+                                )
+                                if pos.numel() == 0:
+                                    continue
+                                for p in pos.flatten().tolist():
+                                    try:
+                                        tok = debug_tokens[ex_i][p]
+                                    except Exception:
+                                        tok = "<unavailable>"
+                                    print(f"  example={ex_i} pos={p} token={tok!r}")
+                                    printed += 1
+                                    if printed >= 10:
+                                        break
                                 if printed >= 10:
                                     break
-                            if printed >= 10:
-                                break
 
-            if do_profile:
-                _maybe_cuda_sync(device, profile_cuda_sync)
-                t_loss_0 = time.perf_counter()
-            loss = masked_spectral_distance(batch[columns.label], pred)
-            if do_profile:
-                _maybe_cuda_sync(device, profile_cuda_sync)
-                loss_s = time.perf_counter() - t_loss_0
+                if do_profile:
+                    _maybe_cuda_sync(device, profile_cuda_sync)
+                    t_loss_0 = time.perf_counter()
+                loss = masked_spectral_distance(batch[columns.label], pred)
+                if do_profile:
+                    _maybe_cuda_sync(device, profile_cuda_sync)
+                    loss_s = time.perf_counter() - t_loss_0
 
             if do_profile:
                 _maybe_cuda_sync(device, profile_cuda_sync)
                 t_bwd_0 = time.perf_counter()
-            loss.backward()
-            if grad_clip > 0:
-                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=grad_clip)
+            if amp_use_grad_scaler and scaler is not None:
+                scaler.scale(loss).backward()
+                if grad_clip > 0:
+                    scaler.unscale_(optimizer)
+                    torch.nn.utils.clip_grad_norm_(
+                        model.parameters(), max_norm=grad_clip
+                    )
+            else:
+                loss.backward()
+                if grad_clip > 0:
+                    torch.nn.utils.clip_grad_norm_(
+                        model.parameters(), max_norm=grad_clip
+                    )
             if do_profile:
                 _maybe_cuda_sync(device, profile_cuda_sync)
                 backward_s = time.perf_counter() - t_bwd_0
@@ -774,7 +850,11 @@ def main() -> int:
             if do_profile:
                 _maybe_cuda_sync(device, profile_cuda_sync)
                 t_opt_0 = time.perf_counter()
-            optimizer.step()
+            if amp_use_grad_scaler and scaler is not None:
+                scaler.step(optimizer)
+                scaler.update()
+            else:
+                optimizer.step()
             if do_profile:
                 _maybe_cuda_sync(device, profile_cuda_sync)
                 optim_s = time.perf_counter() - t_opt_0
@@ -818,8 +898,9 @@ def main() -> int:
             for batch in val_it:
                 batch = _move_batch_to_device(batch, device)
                 batch = _cast_batch_types(batch, columns)
-                pred = model(batch)
-                val_loss = masked_spectral_distance(batch[columns.label], pred)
+                with _amp_autocast_context(device, amp_enabled, amp_dtype):
+                    pred = model(batch)
+                    val_loss = masked_spectral_distance(batch[columns.label], pred)
                 val_loss_total += val_loss.item()
                 val_batches += 1
                 val_it.set_postfix(loss=f"{val_loss.item():.4f}")
@@ -880,8 +961,9 @@ def main() -> int:
             for batch in test_it:
                 batch = _move_batch_to_device(batch, device)
                 batch = _cast_batch_types(batch, columns)
-                pred = model(batch)
-                test_loss = masked_spectral_distance(batch[columns.label], pred)
+                with _amp_autocast_context(device, amp_enabled, amp_dtype):
+                    pred = model(batch)
+                    test_loss = masked_spectral_distance(batch[columns.label], pred)
                 test_loss_total += test_loss.item()
                 test_batches += 1
                 test_it.set_postfix(loss=f"{test_loss.item():.4f}")
