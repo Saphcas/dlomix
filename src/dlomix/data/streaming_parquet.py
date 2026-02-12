@@ -69,17 +69,33 @@ def _filter_by_keep_mask(batch: Dict[str, Any], keep_mask: Sequence[bool]) -> Di
 
 
 class ParquetExampleStream:
-    def __init__(self, path: str, columns: List[str], read_batch_size: int):
+    def __init__(
+        self,
+        path: str,
+        columns: List[str],
+        read_batch_size: int,
+        *,
+        worker_id: int = 0,
+        num_workers: int = 1,
+    ):
         self.path = path
         self.columns = columns
         self.read_batch_size = read_batch_size
+        self.worker_id = worker_id
+        self.num_workers = num_workers
 
     def __iter__(self) -> Iterator[Dict[str, Any]]:
         import pyarrow.parquet as pq
 
         pf = pq.ParquetFile(self.path)
+        row_groups = None
+        if self.num_workers > 1:
+            row_groups = list(range(self.worker_id, pf.num_row_groups, self.num_workers))
+
         for record_batch in pf.iter_batches(
-            batch_size=self.read_batch_size, columns=self.columns
+            batch_size=self.read_batch_size,
+            columns=self.columns,
+            row_groups=row_groups,
         ):
             yield record_batch.to_pydict()
 
@@ -269,17 +285,28 @@ class StreamingFragmentIonIntensityDataset:
             "pin_memory": pin_memory,
         }
 
-    def _iter_split(self, path: str, *, is_test_split: bool) -> Iterator[Dict[str, Any]]:
+    def _iter_split(
+        self,
+        path: str,
+        *,
+        is_test_split: bool,
+        worker_id: int = 0,
+        num_workers: int = 1,
+    ) -> Iterator[Dict[str, Any]]:
         columns = [
             self.config.sequence_column,
             self.config.label_column,
             *self.config.model_features,
         ]
         stream = ParquetExampleStream(
-            path, columns=columns, read_batch_size=self.config.parquet_read_batch_size
+            path,
+            columns=columns,
+            read_batch_size=self.config.parquet_read_batch_size,
+            worker_id=worker_id,
+            num_workers=num_workers,
         )
 
-        rng = random.Random(self.config.seed)
+        rng = random.Random(self.config.seed + int(worker_id))
 
         def iter_examples() -> Iterator[Dict[str, Any]]:
             for record_batch in stream:
@@ -340,7 +367,15 @@ class StreamingFragmentIonIntensityDataset:
 
         class _Iter(torch.utils.data.IterableDataset):
             def __iter__(self_nonlocal):
-                yield from self._iter_split(self.train_path, is_test_split=False)
+                worker_info = torch.utils.data.get_worker_info()
+                worker_id = 0 if worker_info is None else worker_info.id
+                num_workers = 1 if worker_info is None else worker_info.num_workers
+                yield from self._iter_split(
+                    self.train_path,
+                    is_test_split=False,
+                    worker_id=worker_id,
+                    num_workers=num_workers,
+                )
 
         return torch.utils.data.DataLoader(
             _Iter(),
@@ -358,7 +393,15 @@ class StreamingFragmentIonIntensityDataset:
 
         class _Iter(torch.utils.data.IterableDataset):
             def __iter__(self_nonlocal):
-                yield from self._iter_split(self.val_path, is_test_split=False)
+                worker_info = torch.utils.data.get_worker_info()
+                worker_id = 0 if worker_info is None else worker_info.id
+                num_workers = 1 if worker_info is None else worker_info.num_workers
+                yield from self._iter_split(
+                    self.val_path,
+                    is_test_split=False,
+                    worker_id=worker_id,
+                    num_workers=num_workers,
+                )
 
         return torch.utils.data.DataLoader(
             _Iter(),
@@ -376,7 +419,15 @@ class StreamingFragmentIonIntensityDataset:
 
         class _Iter(torch.utils.data.IterableDataset):
             def __iter__(self_nonlocal):
-                yield from self._iter_split(self.test_path, is_test_split=True)
+                worker_info = torch.utils.data.get_worker_info()
+                worker_id = 0 if worker_info is None else worker_info.id
+                num_workers = 1 if worker_info is None else worker_info.num_workers
+                yield from self._iter_split(
+                    self.test_path,
+                    is_test_split=True,
+                    worker_id=worker_id,
+                    num_workers=num_workers,
+                )
 
         return torch.utils.data.DataLoader(
             _Iter(),
