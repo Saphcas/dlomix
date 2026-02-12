@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import os
 import math
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
@@ -68,16 +69,16 @@ from dlomix.models import PrositIntensityPredictor
 # (2) PROSIT-PTM: https://www.biorxiv.org/content/10.1101/2025.11.07.687302v1
 #     "Learning the Unseen: Data-Augmented Deep Learning for PTM Discovery with Prosit-PTM"
 CONFIG = {
-    "train": "/Users/alfred/Datasets/Prosit_PTMs/Prosit_PTMs/PTMs_Train/all_train_ptms_fixed_na.parquet",
-    "val": "/Users/alfred/Datasets/Prosit_PTMs/Prosit_PTMs/PTMs_Train/all_val_ptms_fixed_na.parquet",
-    "test": "/Users/alfred/Datasets/Prosit_PTMs/Prosit_PTMs/PTMs_Train/test.parquet",
+    "train": "/proj/bedrock/datasets/Prosit_PTMs/PTMs_Train/all_train_ptms_fixed_na.parquet",
+    "val": "/proj/bedrock/datasets/Prosit_PTMs/PTMs_Train/all_val_ptms_fixed_na.parquet",
+    "test": "/proj/bedrock/datasets/Prosit_PTMs/PTMs_Train/test.parquet",
     # --- Training loop (evidence: `run_scripts/run_prosit_intensity_torch.py`,
     # `run_scripts/run_prosit_intensity_ptms_torch.py`, and TF scripts) ---
     "epochs": 120,  # according to (2) PROSIT-PTM (FII: max 120 epochs with early stopping)
     # "epochs": 2,  # useful for debugging
     # "epochs": 20,  # evidence: `run_scripts/run_prosit_intensity_torch.py`, `run_scripts/run_prosit_intensity_ptms_torch.py`
     # "epochs": 32,  # according to (1) PROSIT (paper reports 32 epochs)
-    "batch_size": 32,  # reasonable laptop default; (2) PROSIT-PTM excerpt doesn't specify FII batch size
+    "batch_size": 1024,  # reasonable laptop default; (2) PROSIT-PTM excerpt doesn't specify FII batch size
     # "batch_size": 8,  # evidence: PTM torch example uses 8
     # "batch_size": 128,  # evidence: non-PTM torch example + TF PTM script use 128
     # "batch_size": 512,  # according to (1) PROSIT (paper reports batch size 512)
@@ -89,6 +90,8 @@ CONFIG = {
     "shuffle": True,
     "shuffle_buffer_size": 10_000,
     "parquet_read_batch_size": 50_000,
+    "num_workers": 8,
+    "pin_memory": True,
     "with_termini": True,
     "encoding_scheme": "unmod",  # or "naive-mods"
     "sequence_column": "modified_sequence",
@@ -101,6 +104,23 @@ CONFIG = {
     "max_val_batches": 0,
     "max_test_batches": 0,
     "save": None,
+    # --- Optional torch.compile acceleration ---
+    "use_torch_compile": False,
+    "torch_compile_backend": "inductor",
+    "torch_compile_mode": "reduce-overhead",
+    "torch_compile_fullgraph": False,
+    "torch_compile_dynamic": False,
+    # --- Optional CUDA math acceleration ---
+    "enable_tf32": True,
+    "float32_matmul_precision": "high",  # one of: highest, high, medium
+    # --- Optional profiling ---
+    "profile_timing": False,
+    "profile_warmup_batches": 100,
+    "profile_num_batches": 500,
+    "profile_log_every": 100,
+    "profile_cuda_sync": True,  # needed for accurate CUDA phase timing
+    "profile_dataloader_only_batches": 0,  # if >0, run loader-only benchmark then exit
+    "profile_dataloader_move_to_device": False,
     # --- Optional optimizer / stability knobs (evidence: repo examples) ---
     "grad_clip_max_norm": 1.0,  # evidence: torch intensity examples clip with max_norm=1
     # "weight_decay": 0.0,  # evidence: not used in repo examples; keep off unless you add it intentionally
@@ -139,6 +159,45 @@ def _device_from_torch() -> torch.device:
     return torch.device("cpu")
 
 
+def _unwrap_model_for_state_dict(model: torch.nn.Module) -> torch.nn.Module:
+    # torch.compile wraps modules as OptimizedModule with the original module at `_orig_mod`.
+    return getattr(model, "_orig_mod", model)
+
+
+def _maybe_compile_model(
+    model: torch.nn.Module, args: SimpleNamespace
+) -> torch.nn.Module:
+    if not bool(getattr(args, "use_torch_compile", False)):
+        return model
+
+    if not hasattr(torch, "compile"):
+        print(
+            "Warning: torch.compile is unavailable in this torch build; using eager mode."
+        )
+        return model
+
+    backend = getattr(args, "torch_compile_backend", None)
+    mode = getattr(args, "torch_compile_mode", None)
+    fullgraph = bool(getattr(args, "torch_compile_fullgraph", False))
+    dynamic = bool(getattr(args, "torch_compile_dynamic", False))
+
+    compile_kwargs = {
+        "fullgraph": fullgraph,
+        "dynamic": dynamic,
+    }
+    if backend:
+        compile_kwargs["backend"] = backend
+    if mode:
+        compile_kwargs["mode"] = mode
+
+    try:
+        model = torch.compile(model, **compile_kwargs)
+        print(f"Enabled torch.compile with args: {compile_kwargs}")
+    except Exception as exc:
+        print(f"Warning: torch.compile failed ({exc}); falling back to eager mode.")
+    return model
+
+
 def _as_list(csv: str) -> list[str]:
     if csv.strip() == "":
         return []
@@ -159,6 +218,139 @@ def _parquet_num_rows(parquet_path: str) -> int:
     import pyarrow.parquet as pq
 
     return pq.ParquetFile(parquet_path).metadata.num_rows
+
+
+def _estimate_num_steps(
+    parquet_path: str | None, batch_size: int, max_batches: int = 0
+) -> tuple[int | None, int | None]:
+    if parquet_path is None:
+        return None, None
+
+    if max_batches:
+        return int(max_batches), None
+
+    try:
+        num_rows = int(_parquet_num_rows(parquet_path))
+    except Exception as exc:
+        print(
+            f"Warning: Could not estimate num steps from parquet metadata for {parquet_path!r}: {exc}"
+        )
+        return None, None
+
+    return int(math.ceil(num_rows / batch_size)), num_rows
+
+
+def _maybe_cuda_sync(device: torch.device, enabled: bool) -> None:
+    if enabled and device.type == "cuda":
+        torch.cuda.synchronize(device)
+
+
+def _new_timing_totals() -> dict[str, float]:
+    return {
+        "data_wait_s": 0.0,
+        "move_cast_s": 0.0,
+        "forward_s": 0.0,
+        "loss_s": 0.0,
+        "backward_s": 0.0,
+        "optim_s": 0.0,
+        "step_total_s": 0.0,
+    }
+
+
+def _timing_summary(prefix: str, totals: dict[str, float], count: int) -> str:
+    if count <= 0:
+        return f"{prefix}: no profiled batches yet"
+
+    per_batch = {k: (v / count) for k, v in totals.items()}
+    step = max(per_batch["step_total_s"], 1e-12)  # compute step (after batch is ready)
+    cycle = max(
+        per_batch["step_total_s"] + per_batch["data_wait_s"], 1e-12
+    )  # full loop
+
+    def ms(name: str) -> float:
+        return per_batch[name] * 1000.0
+
+    def pct_step(name: str) -> float:
+        return (per_batch[name] / step) * 100.0
+
+    def pct_cycle(name: str) -> float:
+        return (per_batch[name] / cycle) * 100.0
+
+    batches_per_s = 1.0 / cycle
+    return (
+        f"{prefix}: n={count} cycle={cycle * 1000.0:.2f}ms ({batches_per_s:.2f} batch/s) "
+        f"| data_wait={ms('data_wait_s'):.2f}ms ({pct_cycle('data_wait_s'):.1f}% cycle) "
+        f"| step={ms('step_total_s'):.2f}ms "
+        f"| move_cast={ms('move_cast_s'):.2f}ms ({pct_step('move_cast_s'):.1f}% step) "
+        f"| fwd={ms('forward_s'):.2f}ms ({pct_step('forward_s'):.1f}% step) "
+        f"| loss={ms('loss_s'):.2f}ms ({pct_step('loss_s'):.1f}% step) "
+        f"| bwd={ms('backward_s'):.2f}ms ({pct_step('backward_s'):.1f}% step) "
+        f"| opt={ms('optim_s'):.2f}ms ({pct_step('optim_s'):.1f}% step)"
+    )
+
+
+def _run_dataloader_only_profile(
+    dataset: StreamingFragmentIonIntensityDataset,
+    columns: "ColumnConfig",
+    device: torch.device,
+    args: SimpleNamespace,
+) -> None:
+    max_batches = int(getattr(args, "profile_dataloader_only_batches", 0) or 0)
+    if max_batches <= 0:
+        return
+
+    move_to_device = bool(getattr(args, "profile_dataloader_move_to_device", False))
+    print(
+        f"[loader-only] profiling {max_batches} batch(es), move_to_device={move_to_device}"
+    )
+
+    total_wait_s = 0.0
+    total_move_cast_s = 0.0
+    total_examples = 0
+    seen = 0
+    loop_end = time.perf_counter()
+    profile_start = loop_end
+
+    it = tqdm(
+        dataset.tensor_train_data,
+        total=max_batches,
+        desc="Loader-only profile",
+        unit="batch",
+        leave=False,
+    )
+    for batch in it:
+        iter_start = time.perf_counter()
+        total_wait_s += iter_start - loop_end
+
+        t0 = time.perf_counter()
+        if move_to_device:
+            batch = _move_batch_to_device(batch, device)
+        batch = _cast_batch_types(batch, columns)
+        total_move_cast_s += time.perf_counter() - t0
+
+        if columns.sequence in batch and torch.is_tensor(batch[columns.sequence]):
+            total_examples += int(batch[columns.sequence].shape[0])
+        else:
+            total_examples += int(args.batch_size)
+
+        seen += 1
+        loop_end = time.perf_counter()
+        if seen >= max_batches:
+            break
+
+    elapsed_s = time.perf_counter() - profile_start
+    if seen <= 0:
+        print("[loader-only] no batches seen")
+        return
+
+    print(
+        f"[loader-only] batches={seen} examples={total_examples} elapsed={elapsed_s:.2f}s "
+        f"throughput={seen / elapsed_s:.2f} batch/s ({total_examples / elapsed_s:.2f} ex/s)"
+    )
+    print(
+        f"[loader-only] avg_wait={(total_wait_s / seen) * 1000.0:.2f}ms/batch "
+        f"avg_move_cast={(total_move_cast_s / seen) * 1000.0:.2f}ms/batch"
+    )
 
 
 def _set_optimizer_lr(optimizer: torch.optim.Optimizer, lr: float) -> None:
@@ -329,6 +521,19 @@ def main() -> int:
     device = _device_from_torch()
     print(f"Using device: {device}")
 
+    if device.type == "cuda":
+        try:
+            if hasattr(torch, "set_float32_matmul_precision"):
+                torch.set_float32_matmul_precision(
+                    str(getattr(args, "float32_matmul_precision", "high"))
+                )
+            if bool(getattr(args, "enable_tf32", False)):
+                torch.backends.cuda.matmul.allow_tf32 = True
+                torch.backends.cudnn.allow_tf32 = True
+                print("Enabled TF32 for CUDA matmul/cuDNN.")
+        except Exception as exc:
+            print(f"Warning: failed to configure CUDA TF32 options: {exc}")
+
     columns = ColumnConfig(
         sequence=args.sequence_column,
         label=args.label_column,
@@ -373,7 +578,17 @@ def main() -> int:
         label_column=columns.label,
         parquet_read_batch_size=args.parquet_read_batch_size,
         return_debug_tokens=bool(args.debug_unknown_tokens),
+        num_workers=int(getattr(args, "num_workers", 0) or 0),
+        pin_memory=bool(getattr(args, "pin_memory", False)),
     )
+    print(
+        f"DataLoader config: num_workers={int(getattr(args, 'num_workers', 0) or 0)} "
+        f"pin_memory={bool(getattr(args, 'pin_memory', False))}"
+    )
+
+    _run_dataloader_only_profile(dataset, columns, device, args)
+    if int(getattr(args, "profile_dataloader_only_batches", 0) or 0) > 0:
+        return 0
 
     model = PrositIntensityPredictor(
         seq_length=args.max_seq_len,
@@ -397,6 +612,7 @@ def main() -> int:
         },
         with_termini=args.with_termini,
     ).to(device)
+    model = _maybe_compile_model(model, args)
 
     clr_enabled = bool(getattr(args, "use_clr", False))
     clr_base_lr = float(getattr(args, "clr_base_lr", args.lr))
@@ -414,40 +630,99 @@ def main() -> int:
     best_state = None
     epochs_without_improvement = 0
 
-    steps_per_epoch_est = None
-    if clr_enabled:
-        if args.max_train_batches:
-            steps_per_epoch_est = int(args.max_train_batches)
+    train_steps_est, train_rows = _estimate_num_steps(
+        train_path, args.batch_size, int(getattr(args, "max_train_batches", 0) or 0)
+    )
+    val_steps_est, val_rows = _estimate_num_steps(
+        val_path, args.batch_size, int(getattr(args, "max_val_batches", 0) or 0)
+    )
+    test_steps_est, test_rows = _estimate_num_steps(
+        test_path, args.batch_size, int(getattr(args, "max_test_batches", 0) or 0)
+    )
+
+    if train_steps_est is not None:
+        if train_rows is None:
+            print(f"Estimated train steps/epoch: {train_steps_est} (capped)")
         else:
-            steps_per_epoch_est = int(
-                math.ceil(_parquet_num_rows(train_path) / args.batch_size)
+            print(
+                f"Estimated train steps/epoch: {train_steps_est} (rows={train_rows}, batch_size={args.batch_size})"
             )
+    if val_steps_est is not None:
+        if val_rows is None:
+            print(f"Estimated val steps/epoch: {val_steps_est} (capped)")
+        else:
+            print(
+                f"Estimated val steps/epoch: {val_steps_est} (rows={val_rows}, batch_size={args.batch_size})"
+            )
+    if test_steps_est is not None:
+        if test_rows is None:
+            print(f"Estimated test steps: {test_steps_est} (capped)")
+        else:
+            print(
+                f"Estimated test steps: {test_steps_est} (rows={test_rows}, batch_size={args.batch_size})"
+            )
+
+    profile_enabled = bool(getattr(args, "profile_timing", False))
+    profile_warmup = int(getattr(args, "profile_warmup_batches", 100) or 0)
+    profile_num_batches = int(getattr(args, "profile_num_batches", 500) or 0)
+    profile_log_every = int(getattr(args, "profile_log_every", 100) or 0)
+    profile_cuda_sync = bool(getattr(args, "profile_cuda_sync", True))
+    prof_totals = _new_timing_totals()
+    prof_count = 0
+    seen_train_batches = 0
+    if profile_enabled:
+        print(
+            f"[profile] enabled (warmup={profile_warmup}, sample_batches={profile_num_batches}, "
+            f"log_every={profile_log_every}, cuda_sync={profile_cuda_sync})"
+        )
 
     for epoch in range(1, args.epochs + 1):
         model.train()
         train_loss_total = 0.0
         train_batches = 0
+        loop_end = time.perf_counter()
 
         train_it = tqdm(
             dataset.tensor_train_data,
-            total=args.max_train_batches or None,
+            total=train_steps_est,
             desc=f"Epoch {epoch:03d} [train]",
             unit="batch",
             leave=False,
         )
         for batch in train_it:
+            iter_start = time.perf_counter()
+            data_wait_s = iter_start - loop_end
+
+            do_profile = (
+                profile_enabled
+                and seen_train_batches >= profile_warmup
+                and (profile_num_batches <= 0 or prof_count < profile_num_batches)
+            )
+
+            if do_profile:
+                _maybe_cuda_sync(device, profile_cuda_sync)
+                t_move_cast_0 = time.perf_counter()
             batch = _move_batch_to_device(batch, device)
             batch = _cast_batch_types(batch, columns)
+            if do_profile:
+                _maybe_cuda_sync(device, profile_cuda_sync)
+                move_cast_s = time.perf_counter() - t_move_cast_0
 
             optimizer.zero_grad(set_to_none=True)
 
             if clr_enabled:
-                denom = max(1, (steps_per_epoch_est or 1) - 1)
+                denom = max(1, (train_steps_est or 1) - 1)
                 progress = float(train_batches) / float(denom)
                 lr_now = _triangular_lr(progress, clr_base_lr, clr_max_lr)
                 _set_optimizer_lr(optimizer, lr_now)
 
+            if do_profile:
+                _maybe_cuda_sync(device, profile_cuda_sync)
+                t_fwd_0 = time.perf_counter()
             pred = model(batch)
+            if do_profile:
+                _maybe_cuda_sync(device, profile_cuda_sync)
+                forward_s = time.perf_counter() - t_fwd_0
 
             if args.debug_unknown_tokens:
                 seq = batch[columns.sequence]
@@ -478,14 +753,51 @@ def main() -> int:
                             if printed >= 10:
                                 break
 
+            if do_profile:
+                _maybe_cuda_sync(device, profile_cuda_sync)
+                t_loss_0 = time.perf_counter()
             loss = masked_spectral_distance(batch[columns.label], pred)
+            if do_profile:
+                _maybe_cuda_sync(device, profile_cuda_sync)
+                loss_s = time.perf_counter() - t_loss_0
+
+            if do_profile:
+                _maybe_cuda_sync(device, profile_cuda_sync)
+                t_bwd_0 = time.perf_counter()
             loss.backward()
             if grad_clip > 0:
                 torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=grad_clip)
+            if do_profile:
+                _maybe_cuda_sync(device, profile_cuda_sync)
+                backward_s = time.perf_counter() - t_bwd_0
+
+            if do_profile:
+                _maybe_cuda_sync(device, profile_cuda_sync)
+                t_opt_0 = time.perf_counter()
             optimizer.step()
+            if do_profile:
+                _maybe_cuda_sync(device, profile_cuda_sync)
+                optim_s = time.perf_counter() - t_opt_0
             train_loss_total += loss.item()
             train_batches += 1
             train_it.set_postfix(loss=f"{loss.item():.4f}")
+
+            iter_end = time.perf_counter()
+            if do_profile:
+                prof_totals["data_wait_s"] += data_wait_s
+                prof_totals["move_cast_s"] += move_cast_s
+                prof_totals["forward_s"] += forward_s
+                prof_totals["loss_s"] += loss_s
+                prof_totals["backward_s"] += backward_s
+                prof_totals["optim_s"] += optim_s
+                prof_totals["step_total_s"] += iter_end - iter_start
+                prof_count += 1
+
+                if profile_log_every > 0 and (prof_count % profile_log_every == 0):
+                    print(_timing_summary("[profile][train]", prof_totals, prof_count))
+
+            seen_train_batches += 1
+            loop_end = iter_end
             if args.max_train_batches and train_batches >= args.max_train_batches:
                 break
 
@@ -498,7 +810,7 @@ def main() -> int:
         with torch.no_grad():
             val_it = tqdm(
                 dataset.tensor_val_data,
-                total=args.max_val_batches or None,
+                total=val_steps_est,
                 desc=f"Epoch {epoch:03d} [val]",
                 unit="batch",
                 leave=False,
@@ -517,7 +829,10 @@ def main() -> int:
 
         if avg_val_loss < best_val_loss:
             best_val_loss = avg_val_loss
-            best_state = {k: v.detach().cpu() for k, v in model.state_dict().items()}
+            raw_model = _unwrap_model_for_state_dict(model)
+            best_state = {
+                k: v.detach().cpu() for k, v in raw_model.state_dict().items()
+            }
             epochs_without_improvement = 0
         else:
             epochs_without_improvement += 1
@@ -525,6 +840,12 @@ def main() -> int:
         print(
             f"Epoch {epoch:03d}: train_loss={avg_train_loss:.6f} val_loss={avg_val_loss:.6f}"
         )
+        if profile_enabled:
+            print(
+                _timing_summary(
+                    f"[profile][epoch={epoch:03d}]", prof_totals, prof_count
+                )
+            )
 
         if clr_enabled and clr_every > 0 and (epoch % clr_every == 0):
             clr_max_lr *= clr_gamma
@@ -536,7 +857,8 @@ def main() -> int:
             break
 
     if best_state is not None:
-        model.load_state_dict(best_state)
+        raw_model = _unwrap_model_for_state_dict(model)
+        raw_model.load_state_dict(best_state)
         if args.save:
             os.makedirs(os.path.dirname(args.save) or ".", exist_ok=True)
             torch.save(best_state, args.save)
@@ -550,7 +872,7 @@ def main() -> int:
         with torch.no_grad():
             test_it = tqdm(
                 dataset.tensor_test_data,
-                total=args.max_test_batches or None,
+                total=test_steps_est,
                 desc="Test",
                 unit="batch",
                 leave=False,
@@ -567,6 +889,9 @@ def main() -> int:
                     break
         avg_test_loss = test_loss_total / max(1, test_batches)
         print(f"Test loss: {avg_test_loss:.6f}")
+
+    if profile_enabled:
+        print(_timing_summary("[profile][final]", prof_totals, prof_count))
 
     return 0
 
