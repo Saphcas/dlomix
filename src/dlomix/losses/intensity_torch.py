@@ -101,37 +101,39 @@ def gaussian_nll(
     # we add a fuzzing constant epsilon of 1×10−7 to all vectors
     epsilon = 1e-7
 
-    # in previous masking y_true = 0 will be 0, and y_true = -1 will be 0. 
-    # unlike previous methods we do not want to make y_missingness = 0 based on y_true,
-    # mask with ((y_pred + 1) * y_pred) / (y_pred + 1 + epsilon)??
-    # Or y_pred / (y_pred + 1 + epsilon)??
-    # try new masking
+    # Getting indicies of 0 and -1
+    present = y_true > 0
 
     # Masking
-    true_masked = ((y_true + 1) * y_true) / (y_true + 1 + epsilon) # for presence
-    y_true[y_true==-1] = 0 # to allow log()
+    # Currently what is done to missing is also done to y_true?
+    y_true[~present] = 0
+    missingness_target = y_true
+    missingness_target[present] = 1 # To give a yes/no target for the loss function
+    #y_true.where(y_true == -1, torch.tensor(0))
+    #y_true[y_true==-1] = 0 # to allow log()
     true_log_masked = torch.log(y_true + epsilon) # see if logic is sound
-    mean_log_masked = torch.log(y_mean_pred + epsilon)
-    var_log_masked = torch.log(torch.pow(y_var_pred, 2) + epsilon)
+    mean_masked = y_mean_pred + epsilon
+    var_masked = torch.pow(y_var_pred, 2) + epsilon
     missingness_masked = y_missingness_pred + epsilon # Might need to contain between 0 to 1
+ 
+    # Check the size, and try to reduce
+    inner_function = (torch.add(torch.mul(torch.exp(-var_masked), torch.pow(torch.sub(true_log_masked, mean_masked), 2)), var_masked))
+    nll_loss = torch.mean(inner_function) * 1/2
+    
+    # target, presumably y_true, need to be between 0 and 1 for calculating presence_loss(missingness, target)
+    # Since there are known outcomes target only contains 0:s and 1:s
+    presence_loss = torch.nn.BCEWithLogitsLoss(reduction="mean")
+    presence = -presence_loss(missingness_masked, missingness_target) # the prediction should be 1 for present peptides and 0 for missing
 
-    before_sum = (torch.add(torch.mul(torch.exp(-var_log_masked), torch.pow(torch.sub(true_log_masked, mean_log_masked), 2)), var_log_masked))
-    #test1 = torch.exp(-var_log_masked)
-    #test2 = torch.sub(true_log_masked, mean_log_masked)
-    #test3 = torch.pow(test2, 2)
-    #test4 = torch.mul(test1, test3)
-    #test5 = torch.add(test4, var_log_masked)
-    nll_loss = torch.sum(before_sum, 1) * (1/2) # Each batch elements loss
-    total_nll_loss = torch.sum(nll_loss) # Sum of each batch element loss
-
-    y_zero_presence = torch.sub(1, missingness_masked)
-    y_larger_presence = torch.mul(missingness_masked, torch.normal(mean_log_masked, torch.abs(var_log_masked)))
-    # Try torch.where for the condition y==0, currently y_zero starts positive and y_larger can contain negative values
-    # Presumably due to log mean being negative
-    presence_pred = torch.abs(torch.where(y_true == 0, y_zero_presence, y_larger_presence)) # Should probably find better solution for negative presence predictions
-    presence_loss = - torch.sum(torch.log(presence_pred))
-    total_presence_loss = torch.sum(presence_loss)
-
-    total_loss = total_nll_loss + total_presence_loss
+    total_loss = nll_loss + presence
 
     return total_loss
+
+'''
+y_zero_presence = torch.sub(1, missingness_masked)
+y_larger_presence = torch.mul(missingness_masked, torch.normal(mean_log_masked, torch.abs(var_log_masked)))
+# Try torch.where for the condition y==0, currently y_zero starts positive and y_larger can contain negative values
+# Presumably due to log mean being negative
+presence_pred = torch.abs(torch.where(y_true == 0, y_zero_presence, y_larger_presence)) # Should probably find better solution for negative presence predictions
+total_presence_loss = - torch.mean(torch.log(presence_pred))
+'''

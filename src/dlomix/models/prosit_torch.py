@@ -386,7 +386,7 @@ class PrositIntensityUncertaintyPredictor(nn.Module):
         meta_data_keys=None,
         with_termini=True,
     ):
-        super(PrositIntensityPredictor, self).__init__()
+        super(PrositIntensityUncertaintyPredictor, self).__init__()
 
         self.dropout_rate = dropout_rate
         self.latent_dropout_rate = latent_dropout_rate

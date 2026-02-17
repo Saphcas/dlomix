@@ -21,11 +21,13 @@ logging.basicConfig(
 
 BATCH_SIZE = 8
 N_EPOCHS = 20
-UNCERTAINTY_AWARE = False
+UNCERTAINTY_AWARE = True
 if torch.cuda.is_available():
     device = torch.device("cuda:0")
+    print("Using cuda:0")
 else:
     device = torch.device("cpu")
+    print("Using cpu")
 
 TRAIN_DATAPATH = "example_dataset/intensity/third_pool_processed_sample.parquet"
 #TRAIN_DATAPATH = "prospect_data/train_dataset.parquet"
@@ -49,7 +51,7 @@ d = FragmentIonIntensityDataset(
     encoding_scheme="naive-mods", # Was missing in original code, setting encoding scheme to naive-mods is what allows modifications to exist (default is Un-modified (UNMOD))
 )
 
-print(d)
+#print(d)
 
 # If this can work there's no need for pre-processing
 #d = load_processed_dataset("prospect_data/processed")
