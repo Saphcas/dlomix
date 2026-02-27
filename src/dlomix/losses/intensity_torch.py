@@ -105,9 +105,8 @@ def gaussian_nll(
     present = y_true > 0
 
     # Masking
-    # Currently what is done to missing is also done to y_true?
     y_true[~present] = 0
-    missingness_target = y_true
+    missingness_target = torch.clone(y_true)
     missingness_target[present] = 1 # To give a yes/no target for the loss function
     #y_true.where(y_true == -1, torch.tensor(0))
     #y_true[y_true==-1] = 0 # to allow log()
@@ -115,7 +114,7 @@ def gaussian_nll(
     mean_masked = y_mean_pred + epsilon
     var_masked = torch.pow(y_var_pred, 2) + epsilon
     missingness_masked = y_missingness_pred + epsilon # Might need to contain between 0 to 1
- 
+
     # Check the size, and try to reduce
     inner_function = (torch.add(torch.mul(torch.exp(-var_masked), torch.pow(torch.sub(true_log_masked, mean_masked), 2)), var_masked))
     nll_loss = torch.mean(inner_function) * 1/2
