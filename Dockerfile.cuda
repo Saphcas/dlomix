@@ -1,0 +1,32 @@
+FROM nvidia/cuda:12.4.1-cudnn-runtime-ubuntu22.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV PYTHONUNBUFFERED=1
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PIP_NO_CACHE_DIR=1
+ENV DLOMIX_BACKEND=torch
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+    python3 \
+    python3-pip \
+    python3-venv \
+    python3-dev \
+    build-essential \
+    ca-certificates && \
+    update-ca-certificates && \
+    rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Install CUDA-enabled PyTorch wheels first so dlomix resolves against them.
+RUN python3 -m pip install --upgrade pip setuptools wheel && \
+    python3 -m pip install --index-url https://download.pytorch.org/whl/cu124 \
+    torch torchvision
+
+COPY README.md pyproject.toml setup.py /app/
+COPY src /app/src
+
+RUN python3 -m pip install .
+
+CMD ["python3"]
