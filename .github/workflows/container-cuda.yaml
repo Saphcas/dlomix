@@ -46,3 +46,22 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      - name: Install Apptainer
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y apptainer
+
+      - name: Pick a tag (use first generated tag)
+        run: |
+          echo "IMAGE_TAG=$(echo '${{ steps.meta.outputs.tags }}' | head -n1)" >> $GITHUB_ENV
+
+      - name: Build Apptainer image from GHCR
+        run: |
+          apptainer build cuda-image.sif docker://${IMAGE_TAG}
+
+      - name: Upload Apptainer image
+        uses: actions/upload-artifact@v4
+        with:
+          name: cuda-apptainer-image
+          path: ./Apptainerfile.sif
