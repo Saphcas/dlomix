@@ -14,7 +14,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up Docker Buildx
+      - name: Setup Docker Buildx
         uses: docker/setup-buildx-action@v3
 
       - name: Log in to GitHub Container Registry
@@ -24,7 +24,7 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Extract image metadata
+      - name: Extract Image Metadata
         id: meta
         uses: docker/metadata-action@v5
         with:
@@ -35,7 +35,7 @@ jobs:
             type=sha,prefix=sha-
             type=raw,value=latest,enable={{is_default_branch}}
 
-      - name: Build and push CUDA image
+      - name: Build and Push CUDA Image
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -47,6 +47,13 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+      - name: Free-up Disk Space
+        run: |
+          docker system prune -af
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /opt/ghc
+          sudo rm -rf /usr/local/lib/android
+
       - name: Install Apptainer
         run: |
           sudo apt-get update
@@ -55,15 +62,15 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y apptainer
 
-      - name: Pick a tag (use first generated tag)
+      - name: Fetch Image Tag
         run: |
           echo "IMAGE_TAG=$(echo '${{ steps.meta.outputs.tags }}' | head -n1)" >> $GITHUB_ENV
 
-      - name: Build Apptainer image from GHCR
+      - name: Build Apptainer Image from GHCR
         run: |
           apptainer build Apptainerfile.sif docker://${IMAGE_TAG}
 
-      - name: Upload Apptainer image
+      - name: Upload Apptainer Image
         uses: actions/upload-artifact@v4
         with:
           name: cuda-apptainer-image
