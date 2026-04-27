@@ -118,6 +118,9 @@ def gaussian_nll(
     # Check the size, and try to reduce
     inner_function = (torch.add(torch.mul(torch.exp(-var_masked), torch.pow(torch.sub(true_log_masked, mean_masked), 2)), var_masked))
     nll_loss = torch.mean(inner_function) * 1/2
+
+    #inner_function = torch.add(torch.div(torch.pow(torch.sub(true_log_masked, mean_masked), 2), var_masked), torch.log(var_masked))
+    #inner_function = inner_function + np.log(2*np.pi)
     
     # target, presumably y_true, need to be between 0 and 1 for calculating presence_loss(missingness, target)
     # Since there are known outcomes target only contains 0:s and 1:s
