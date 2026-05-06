@@ -5,6 +5,9 @@
 # Ignore VSCode folder
 .vscode/
 
+# Ignore container def file
+container.def
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]

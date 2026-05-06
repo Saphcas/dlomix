@@ -1,6 +1,7 @@
 .git
 .github
 .devcontainer
+.vscode
 docs
 notebooks
 tests
@@ -16,3 +17,4 @@ __pycache__
 .pytest_cache
 .mypy_cache
 *.ipynb
+container.def
