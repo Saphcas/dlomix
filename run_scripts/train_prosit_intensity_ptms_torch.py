@@ -39,6 +39,7 @@ from typing import Iterable
 repo_root = Path(__file__).resolve().parent.parent
 HF_CACHE_ROOT = (repo_root / ".hf").expanduser()
 # or set HF_CACHE_ROOT = Path("/path/to/your/cache").expanduser() for a custom location
+# If ran within container it will refer to the container root
 
 hf_root = Path(os.environ.get("HF_HOME", str(HF_CACHE_ROOT))).expanduser()
 hf_datasets_cache = Path(
@@ -70,9 +71,10 @@ from dlomix.models import PrositIntensityPredictor
 # (2) PROSIT-PTM: https://www.biorxiv.org/content/10.1101/2025.11.07.687302v1
 #     "Learning the Unseen: Data-Augmented Deep Learning for PTM Discovery with Prosit-PTM"
 CONFIG = {
-    "train": "/proj/bedrock/datasets/Prosit_PTMs/PTMs_Train/all_train_ptms_fixed_na.parquet",
-    "val": "/proj/bedrock/datasets/Prosit_PTMs/PTMs_Train/all_val_ptms_fixed_na.parquet",
-    "test": "/proj/bedrock/datasets/Prosit_PTMs/PTMs_Train/test.parquet",
+    # Path within container, remember to define the path names when creating the image
+    "train": "/data/all_train_ptms_fixed_na.parquet",
+    "val": "/data/val_ptms_fixed_na.parquet",
+    "test": "/data/test.parquet",
     # --- Training loop (evidence: `run_scripts/run_prosit_intensity_torch.py`,
     # `run_scripts/run_prosit_intensity_ptms_torch.py`, and TF scripts) ---
     "epochs": 120,  # according to (2) PROSIT-PTM (FII: max 120 epochs with early stopping)
