@@ -66,8 +66,8 @@ import torch
 from tqdm.auto import tqdm
 
 from dlomix.data import StreamingFragmentIonIntensityDataset
-from dlomix.losses.intensity_torch import masked_spectral_distance
-from dlomix.models import PrositIntensityPredictor
+from dlomix.losses.intensity_torch import masked_spectral_distance, gaussian_nll
+from dlomix.models import PrositIntensityPredictor, PrositIntensityUncertaintyPredictor
 
 # -----------------------------------------------------------------------------
 # Configuration
@@ -77,10 +77,13 @@ from dlomix.models import PrositIntensityPredictor
 # (2) PROSIT-PTM: https://www.biorxiv.org/content/10.1101/2025.11.07.687302v1
 #     "Learning the Unseen: Data-Augmented Deep Learning for PTM Discovery with Prosit-PTM"
 CONFIG = {
+    # --- Model Settings ---
     # Path within container, remember to define the path names when creating the image
     "train": f"{str(data_location)}/all_train_ptms_fixed_na.parquet",
     "val": f"{str(data_location)}/all_val_ptms_fixed_na.parquet",
     "test": f"{str(data_location)}/test.parquet",
+    # Bool for model selection, false will use the current Prosit standard of masked spectral distance
+    "uncertainty_aware": True,
     # --- Training loop (evidence: `run_scripts/run_prosit_intensity_torch.py`,
     # `run_scripts/run_prosit_intensity_ptms_torch.py`, and TF scripts) ---
     "epochs": 120,  # according to (2) PROSIT-PTM (FII: max 120 epochs with early stopping)
@@ -677,29 +680,54 @@ def main() -> int:
     if int(getattr(args, "profile_dataloader_only_batches", 0) or 0) > 0:
         return 0
 
-    model = PrositIntensityPredictor(
-        seq_length=args.max_seq_len,
-        **{
-            k: getattr(args, k)
-            for k in (
-                "embedding_output_dim",
-                "dropout_rate",
-                "latent_dropout_rate",
-                "recurrent_layers_sizes",
-                "regressor_layer_size",
-                "len_fion",
-            )
-            if hasattr(args, k)
-        },
-        use_prosit_ptm_features=True,
-        input_keys={"SEQUENCE_KEY": columns.sequence},
-        meta_data_keys={
-            "COLLISION_ENERGY_KEY": columns.collision_energy,
-            "PRECURSOR_CHARGE_KEY": columns.precursor_charge,
-        },
-        with_termini=args.with_termini,
-    ).to(device)
-    model = _maybe_compile_model(model, args)
+    if args.uncertainty_aware:
+        model = PrositIntensityUncertaintyPredictor(
+            seq_length=args.max_seq_len,
+            **{
+                k: getattr(args, k)
+                for k in (
+                    "embedding_output_dim",
+                    "dropout_rate",
+                    "latent_dropout_rate",
+                    "recurrent_layers_sizes",
+                    "regressor_layer_size",
+                    "len_fion",
+                )
+                if hasattr(args, k)
+            },
+            use_prosit_ptm_features=True,
+            input_keys={"SEQUENCE_KEY": columns.sequence},
+            meta_data_keys={
+                "COLLISION_ENERGY_KEY": columns.collision_energy,
+                "PRECURSOR_CHARGE_KEY": columns.precursor_charge,
+            },
+            with_termini=args.with_termini,
+        ).to(device)
+        model = _maybe_compile_model(model, args)
+    else:
+        model = PrositIntensityPredictor(
+            seq_length=args.max_seq_len,
+            **{
+                k: getattr(args, k)
+                for k in (
+                    "embedding_output_dim",
+                    "dropout_rate",
+                    "latent_dropout_rate",
+                    "recurrent_layers_sizes",
+                    "regressor_layer_size",
+                    "len_fion",
+                )
+                if hasattr(args, k)
+            },
+            use_prosit_ptm_features=True,
+            input_keys={"SEQUENCE_KEY": columns.sequence},
+            meta_data_keys={
+                "COLLISION_ENERGY_KEY": columns.collision_energy,
+                "PRECURSOR_CHARGE_KEY": columns.precursor_charge,
+            },
+            with_termini=args.with_termini,
+        ).to(device)
+        model = _maybe_compile_model(model, args)
 
     clr_enabled = bool(getattr(args, "use_clr", False))
     clr_base_lr = float(getattr(args, "clr_base_lr", args.lr))
@@ -762,202 +790,398 @@ def main() -> int:
             f"[profile] enabled (warmup={profile_warmup}, sample_batches={profile_num_batches}, "
             f"log_every={profile_log_every}, cuda_sync={profile_cuda_sync})"
         )
+    if args.uncertainty_aware:
+        for epoch in range(1, args.epochs + 1):
+            model.train()
+            train_loss_total = 0.0
+            train_batches = 0
+            loop_end = time.perf_counter()
 
-    for epoch in range(1, args.epochs + 1):
-        model.train()
-        train_loss_total = 0.0
-        train_batches = 0
-        loop_end = time.perf_counter()
-
-        train_it = tqdm(
-            dataset.tensor_train_data,
-            total=train_steps_est,
-            desc=f"Epoch {epoch:03d} [train]",
-            unit="batch",
-            leave=False,
-        )
-        for batch in train_it:
-            iter_start = time.perf_counter()
-            data_wait_s = iter_start - loop_end
-
-            do_profile = (
-                profile_enabled
-                and seen_train_batches >= profile_warmup
-                and (profile_num_batches <= 0 or prof_count < profile_num_batches)
-            )
-
-            if do_profile:
-                _maybe_cuda_sync(device, profile_cuda_sync)
-                t_move_cast_0 = time.perf_counter()
-            batch = _move_batch_to_device(batch, device)
-            batch = _cast_batch_types(batch, columns)
-            if do_profile:
-                _maybe_cuda_sync(device, profile_cuda_sync)
-                move_cast_s = time.perf_counter() - t_move_cast_0
-
-            optimizer.zero_grad(set_to_none=True)
-
-            if clr_enabled:
-                denom = max(1, (train_steps_est or 1) - 1)
-                progress = float(train_batches) / float(denom)
-                lr_now = _triangular_lr(progress, clr_base_lr, clr_max_lr)
-                _set_optimizer_lr(optimizer, lr_now)
-
-            if do_profile:
-                _maybe_cuda_sync(device, profile_cuda_sync)
-                t_fwd_0 = time.perf_counter()
-            with _amp_autocast_context(device, amp_enabled, amp_dtype):
-                pred = model(batch)
-                if do_profile:
-                    _maybe_cuda_sync(device, profile_cuda_sync)
-                    forward_s = time.perf_counter() - t_fwd_0
-
-                if args.debug_unknown_tokens:
-                    seq = batch[columns.sequence]
-                    unknown_token_index = getattr(dataset, "unknown_token_index", 23)
-                    any_unknowns = (seq == unknown_token_index).sum()
-                    if any_unknowns > 0:
-                        print(
-                            f"Warning: Found {any_unknowns} unknown tokens (id={unknown_token_index}) in batch sequences."
-                        )
-                        if "_debug_input_tokens" in batch:
-                            debug_tokens = batch["_debug_input_tokens"]
-                            printed = 0
-                            for ex_i in range(seq.shape[0]):
-                                pos = (seq[ex_i] == unknown_token_index).nonzero(
-                                    as_tuple=False
-                                )
-                                if pos.numel() == 0:
-                                    continue
-                                for p in pos.flatten().tolist():
-                                    try:
-                                        tok = debug_tokens[ex_i][p]
-                                    except Exception:
-                                        tok = "<unavailable>"
-                                    print(f"  example={ex_i} pos={p} token={tok!r}")
-                                    printed += 1
-                                    if printed >= 10:
-                                        break
-                                if printed >= 10:
-                                    break
-
-                if do_profile:
-                    _maybe_cuda_sync(device, profile_cuda_sync)
-                    t_loss_0 = time.perf_counter()
-                loss = masked_spectral_distance(batch[columns.label], pred)
-                if do_profile:
-                    _maybe_cuda_sync(device, profile_cuda_sync)
-                    loss_s = time.perf_counter() - t_loss_0
-
-            if do_profile:
-                _maybe_cuda_sync(device, profile_cuda_sync)
-                t_bwd_0 = time.perf_counter()
-            if amp_use_grad_scaler and scaler is not None:
-                scaler.scale(loss).backward()
-                if grad_clip > 0:
-                    scaler.unscale_(optimizer)
-                    torch.nn.utils.clip_grad_norm_(
-                        model.parameters(), max_norm=grad_clip
-                    )
-            else:
-                loss.backward()
-                if grad_clip > 0:
-                    torch.nn.utils.clip_grad_norm_(
-                        model.parameters(), max_norm=grad_clip
-                    )
-            if do_profile:
-                _maybe_cuda_sync(device, profile_cuda_sync)
-                backward_s = time.perf_counter() - t_bwd_0
-
-            if do_profile:
-                _maybe_cuda_sync(device, profile_cuda_sync)
-                t_opt_0 = time.perf_counter()
-            if amp_use_grad_scaler and scaler is not None:
-                scaler.step(optimizer)
-                scaler.update()
-            else:
-                optimizer.step()
-            if do_profile:
-                _maybe_cuda_sync(device, profile_cuda_sync)
-                optim_s = time.perf_counter() - t_opt_0
-            train_loss_total += loss.item()
-            train_batches += 1
-            train_it.set_postfix(loss=f"{loss.item():.4f}")
-
-            iter_end = time.perf_counter()
-            if do_profile:
-                prof_totals["data_wait_s"] += data_wait_s
-                prof_totals["move_cast_s"] += move_cast_s
-                prof_totals["forward_s"] += forward_s
-                prof_totals["loss_s"] += loss_s
-                prof_totals["backward_s"] += backward_s
-                prof_totals["optim_s"] += optim_s
-                prof_totals["step_total_s"] += iter_end - iter_start
-                prof_count += 1
-
-                if profile_log_every > 0 and (prof_count % profile_log_every == 0):
-                    print(_timing_summary("[profile][train]", prof_totals, prof_count))
-
-            seen_train_batches += 1
-            loop_end = iter_end
-            if args.max_train_batches and train_batches >= args.max_train_batches:
-                break
-
-        avg_train_loss = train_loss_total / max(1, train_batches)
-
-        # Validation
-        model.eval()
-        val_loss_total = 0.0
-        val_batches = 0
-        with torch.no_grad():
-            val_it = tqdm(
-                dataset.tensor_val_data,
-                total=val_steps_est,
-                desc=f"Epoch {epoch:03d} [val]",
+            train_it = tqdm(
+                dataset.tensor_train_data,
+                total=train_steps_est,
+                desc=f"Epoch {epoch:03d} [train]",
                 unit="batch",
                 leave=False,
             )
-            for batch in val_it:
+            for batch in train_it:
+                iter_start = time.perf_counter()
+                data_wait_s = iter_start - loop_end
+
+                do_profile = (
+                    profile_enabled
+                    and seen_train_batches >= profile_warmup
+                    and (profile_num_batches <= 0 or prof_count < profile_num_batches)
+                )
+
+                if do_profile:
+                    _maybe_cuda_sync(device, profile_cuda_sync)
+                    t_move_cast_0 = time.perf_counter()
                 batch = _move_batch_to_device(batch, device)
                 batch = _cast_batch_types(batch, columns)
+                if do_profile:
+                    _maybe_cuda_sync(device, profile_cuda_sync)
+                    move_cast_s = time.perf_counter() - t_move_cast_0
+
+                optimizer.zero_grad(set_to_none=True)
+
+                if clr_enabled:
+                    denom = max(1, (train_steps_est or 1) - 1)
+                    progress = float(train_batches) / float(denom)
+                    lr_now = _triangular_lr(progress, clr_base_lr, clr_max_lr)
+                    _set_optimizer_lr(optimizer, lr_now)
+
+                if do_profile:
+                    _maybe_cuda_sync(device, profile_cuda_sync)
+                    t_fwd_0 = time.perf_counter()
+                with _amp_autocast_context(device, amp_enabled, amp_dtype):
+                    pred_mean, pred_var, pred_missingness = model(batch)
+                    if do_profile:
+                        _maybe_cuda_sync(device, profile_cuda_sync)
+                        forward_s = time.perf_counter() - t_fwd_0
+
+                    if args.debug_unknown_tokens:
+                        seq = batch[columns.sequence]
+                        unknown_token_index = getattr(dataset, "unknown_token_index", 23)
+                        any_unknowns = (seq == unknown_token_index).sum()
+                        if any_unknowns > 0:
+                            print(
+                                f"Warning: Found {any_unknowns} unknown tokens (id={unknown_token_index}) in batch sequences."
+                            )
+                            if "_debug_input_tokens" in batch:
+                                debug_tokens = batch["_debug_input_tokens"]
+                                printed = 0
+                                for ex_i in range(seq.shape[0]):
+                                    pos = (seq[ex_i] == unknown_token_index).nonzero(
+                                        as_tuple=False
+                                    )
+                                    if pos.numel() == 0:
+                                        continue
+                                    for p in pos.flatten().tolist():
+                                        try:
+                                            tok = debug_tokens[ex_i][p]
+                                        except Exception:
+                                            tok = "<unavailable>"
+                                        print(f"  example={ex_i} pos={p} token={tok!r}")
+                                        printed += 1
+                                        if printed >= 10:
+                                            break
+                                    if printed >= 10:
+                                        break
+
+                    if do_profile:
+                        _maybe_cuda_sync(device, profile_cuda_sync)
+                        t_loss_0 = time.perf_counter()
+                    loss = gaussian_nll(batch[columns.label], pred_mean, pred_var, pred_missingness)
+                    if do_profile:
+                        _maybe_cuda_sync(device, profile_cuda_sync)
+                        loss_s = time.perf_counter() - t_loss_0
+
+                if do_profile:
+                    _maybe_cuda_sync(device, profile_cuda_sync)
+                    t_bwd_0 = time.perf_counter()
+                if amp_use_grad_scaler and scaler is not None:
+                    scaler.scale(loss).backward()
+                    if grad_clip > 0:
+                        scaler.unscale_(optimizer)
+                        torch.nn.utils.clip_grad_norm_(
+                            model.parameters(), max_norm=grad_clip
+                        )
+                else:
+                    loss.backward()
+                    if grad_clip > 0:
+                        torch.nn.utils.clip_grad_norm_(
+                            model.parameters(), max_norm=grad_clip
+                        )
+                if do_profile:
+                    _maybe_cuda_sync(device, profile_cuda_sync)
+                    backward_s = time.perf_counter() - t_bwd_0
+
+                if do_profile:
+                    _maybe_cuda_sync(device, profile_cuda_sync)
+                    t_opt_0 = time.perf_counter()
+                if amp_use_grad_scaler and scaler is not None:
+                    scaler.step(optimizer)
+                    scaler.update()
+                else:
+                    optimizer.step()
+                if do_profile:
+                    _maybe_cuda_sync(device, profile_cuda_sync)
+                    optim_s = time.perf_counter() - t_opt_0
+                train_loss_total += loss.item()
+                train_batches += 1
+                train_it.set_postfix(loss=f"{loss.item():.4f}")
+
+                iter_end = time.perf_counter()
+                if do_profile:
+                    prof_totals["data_wait_s"] += data_wait_s
+                    prof_totals["move_cast_s"] += move_cast_s
+                    prof_totals["forward_s"] += forward_s
+                    prof_totals["loss_s"] += loss_s
+                    prof_totals["backward_s"] += backward_s
+                    prof_totals["optim_s"] += optim_s
+                    prof_totals["step_total_s"] += iter_end - iter_start
+                    prof_count += 1
+
+                    if profile_log_every > 0 and (prof_count % profile_log_every == 0):
+                        print(_timing_summary("[profile][train]", prof_totals, prof_count))
+
+                seen_train_batches += 1
+                loop_end = iter_end
+                if args.max_train_batches and train_batches >= args.max_train_batches:
+                    break
+
+            avg_train_loss = train_loss_total / max(1, train_batches)
+
+            # Validation
+            model.eval()
+            val_loss_total = 0.0
+            val_batches = 0
+            with torch.no_grad():
+                val_it = tqdm(
+                    dataset.tensor_val_data,
+                    total=val_steps_est,
+                    desc=f"Epoch {epoch:03d} [val]",
+                    unit="batch",
+                    leave=False,
+                )
+                for batch in val_it:
+                    batch = _move_batch_to_device(batch, device)
+                    batch = _cast_batch_types(batch, columns)
+                    with _amp_autocast_context(device, amp_enabled, amp_dtype):
+                        pred_mean, pred_var, pred_missingness = model(batch)
+                        val_loss = gaussian_nll(batch[columns.label], pred_mean, pred_var, pred_missingness)
+                    val_loss_total += val_loss.item()
+                    val_batches += 1
+                    val_it.set_postfix(loss=f"{val_loss.item():.4f}")
+                    if args.max_val_batches and val_batches >= args.max_val_batches:
+                        break
+            avg_val_loss = val_loss_total / max(1, val_batches)
+
+            if avg_val_loss < best_val_loss:
+                best_val_loss = avg_val_loss
+                raw_model = _unwrap_model_for_state_dict(model)
+                best_state = {
+                    k: v.detach().cpu() for k, v in raw_model.state_dict().items()
+                }
+                epochs_without_improvement = 0
+            else:
+                epochs_without_improvement += 1
+
+            print(
+                f"Epoch {epoch:03d}: train_loss={avg_train_loss:.6f} val_loss={avg_val_loss:.6f}"
+            )
+            if profile_enabled:
+                print(
+                    _timing_summary(
+                        f"[profile][epoch={epoch:03d}]", prof_totals, prof_count
+                    )
+                )
+
+            if clr_enabled and clr_every > 0 and (epoch % clr_every == 0):
+                clr_max_lr *= clr_gamma
+
+            if early_patience > 0 and epochs_without_improvement >= early_patience:
+                print(
+                    f"Early stopping: no val improvement for {epochs_without_improvement} epoch(s) (patience={early_patience})."
+                )
+                break
+    else:
+        for epoch in range(1, args.epochs + 1):
+            model.train()
+            train_loss_total = 0.0
+            train_batches = 0
+            loop_end = time.perf_counter()
+
+            train_it = tqdm(
+                dataset.tensor_train_data,
+                total=train_steps_est,
+                desc=f"Epoch {epoch:03d} [train]",
+                unit="batch",
+                leave=False,
+            )
+            for batch in train_it:
+                iter_start = time.perf_counter()
+                data_wait_s = iter_start - loop_end
+
+                do_profile = (
+                    profile_enabled
+                    and seen_train_batches >= profile_warmup
+                    and (profile_num_batches <= 0 or prof_count < profile_num_batches)
+                )
+
+                if do_profile:
+                    _maybe_cuda_sync(device, profile_cuda_sync)
+                    t_move_cast_0 = time.perf_counter()
+                batch = _move_batch_to_device(batch, device)
+                batch = _cast_batch_types(batch, columns)
+                if do_profile:
+                    _maybe_cuda_sync(device, profile_cuda_sync)
+                    move_cast_s = time.perf_counter() - t_move_cast_0
+
+                optimizer.zero_grad(set_to_none=True)
+
+                if clr_enabled:
+                    denom = max(1, (train_steps_est or 1) - 1)
+                    progress = float(train_batches) / float(denom)
+                    lr_now = _triangular_lr(progress, clr_base_lr, clr_max_lr)
+                    _set_optimizer_lr(optimizer, lr_now)
+
+                if do_profile:
+                    _maybe_cuda_sync(device, profile_cuda_sync)
+                    t_fwd_0 = time.perf_counter()
                 with _amp_autocast_context(device, amp_enabled, amp_dtype):
                     pred = model(batch)
-                    val_loss = masked_spectral_distance(batch[columns.label], pred)
-                val_loss_total += val_loss.item()
-                val_batches += 1
-                val_it.set_postfix(loss=f"{val_loss.item():.4f}")
-                if args.max_val_batches and val_batches >= args.max_val_batches:
+                    if do_profile:
+                        _maybe_cuda_sync(device, profile_cuda_sync)
+                        forward_s = time.perf_counter() - t_fwd_0
+
+                    if args.debug_unknown_tokens:
+                        seq = batch[columns.sequence]
+                        unknown_token_index = getattr(dataset, "unknown_token_index", 23)
+                        any_unknowns = (seq == unknown_token_index).sum()
+                        if any_unknowns > 0:
+                            print(
+                                f"Warning: Found {any_unknowns} unknown tokens (id={unknown_token_index}) in batch sequences."
+                            )
+                            if "_debug_input_tokens" in batch:
+                                debug_tokens = batch["_debug_input_tokens"]
+                                printed = 0
+                                for ex_i in range(seq.shape[0]):
+                                    pos = (seq[ex_i] == unknown_token_index).nonzero(
+                                        as_tuple=False
+                                    )
+                                    if pos.numel() == 0:
+                                        continue
+                                    for p in pos.flatten().tolist():
+                                        try:
+                                            tok = debug_tokens[ex_i][p]
+                                        except Exception:
+                                            tok = "<unavailable>"
+                                        print(f"  example={ex_i} pos={p} token={tok!r}")
+                                        printed += 1
+                                        if printed >= 10:
+                                            break
+                                    if printed >= 10:
+                                        break
+
+                    if do_profile:
+                        _maybe_cuda_sync(device, profile_cuda_sync)
+                        t_loss_0 = time.perf_counter()
+                    loss = masked_spectral_distance(batch[columns.label], pred)
+                    if do_profile:
+                        _maybe_cuda_sync(device, profile_cuda_sync)
+                        loss_s = time.perf_counter() - t_loss_0
+
+                if do_profile:
+                    _maybe_cuda_sync(device, profile_cuda_sync)
+                    t_bwd_0 = time.perf_counter()
+                if amp_use_grad_scaler and scaler is not None:
+                    scaler.scale(loss).backward()
+                    if grad_clip > 0:
+                        scaler.unscale_(optimizer)
+                        torch.nn.utils.clip_grad_norm_(
+                            model.parameters(), max_norm=grad_clip
+                        )
+                else:
+                    loss.backward()
+                    if grad_clip > 0:
+                        torch.nn.utils.clip_grad_norm_(
+                            model.parameters(), max_norm=grad_clip
+                        )
+                if do_profile:
+                    _maybe_cuda_sync(device, profile_cuda_sync)
+                    backward_s = time.perf_counter() - t_bwd_0
+
+                if do_profile:
+                    _maybe_cuda_sync(device, profile_cuda_sync)
+                    t_opt_0 = time.perf_counter()
+                if amp_use_grad_scaler and scaler is not None:
+                    scaler.step(optimizer)
+                    scaler.update()
+                else:
+                    optimizer.step()
+                if do_profile:
+                    _maybe_cuda_sync(device, profile_cuda_sync)
+                    optim_s = time.perf_counter() - t_opt_0
+                train_loss_total += loss.item()
+                train_batches += 1
+                train_it.set_postfix(loss=f"{loss.item():.4f}")
+
+                iter_end = time.perf_counter()
+                if do_profile:
+                    prof_totals["data_wait_s"] += data_wait_s
+                    prof_totals["move_cast_s"] += move_cast_s
+                    prof_totals["forward_s"] += forward_s
+                    prof_totals["loss_s"] += loss_s
+                    prof_totals["backward_s"] += backward_s
+                    prof_totals["optim_s"] += optim_s
+                    prof_totals["step_total_s"] += iter_end - iter_start
+                    prof_count += 1
+
+                    if profile_log_every > 0 and (prof_count % profile_log_every == 0):
+                        print(_timing_summary("[profile][train]", prof_totals, prof_count))
+
+                seen_train_batches += 1
+                loop_end = iter_end
+                if args.max_train_batches and train_batches >= args.max_train_batches:
                     break
-        avg_val_loss = val_loss_total / max(1, val_batches)
 
-        if avg_val_loss < best_val_loss:
-            best_val_loss = avg_val_loss
-            raw_model = _unwrap_model_for_state_dict(model)
-            best_state = {
-                k: v.detach().cpu() for k, v in raw_model.state_dict().items()
-            }
-            epochs_without_improvement = 0
-        else:
-            epochs_without_improvement += 1
+            avg_train_loss = train_loss_total / max(1, train_batches)
 
-        print(
-            f"Epoch {epoch:03d}: train_loss={avg_train_loss:.6f} val_loss={avg_val_loss:.6f}"
-        )
-        if profile_enabled:
-            print(
-                _timing_summary(
-                    f"[profile][epoch={epoch:03d}]", prof_totals, prof_count
+            # Validation
+            model.eval()
+            val_loss_total = 0.0
+            val_batches = 0
+            with torch.no_grad():
+                val_it = tqdm(
+                    dataset.tensor_val_data,
+                    total=val_steps_est,
+                    desc=f"Epoch {epoch:03d} [val]",
+                    unit="batch",
+                    leave=False,
                 )
-            )
+                for batch in val_it:
+                    batch = _move_batch_to_device(batch, device)
+                    batch = _cast_batch_types(batch, columns)
+                    with _amp_autocast_context(device, amp_enabled, amp_dtype):
+                        pred = model(batch)
+                        val_loss = masked_spectral_distance(batch[columns.label], pred)
+                    val_loss_total += val_loss.item()
+                    val_batches += 1
+                    val_it.set_postfix(loss=f"{val_loss.item():.4f}")
+                    if args.max_val_batches and val_batches >= args.max_val_batches:
+                        break
+            avg_val_loss = val_loss_total / max(1, val_batches)
 
-        if clr_enabled and clr_every > 0 and (epoch % clr_every == 0):
-            clr_max_lr *= clr_gamma
+            if avg_val_loss < best_val_loss:
+                best_val_loss = avg_val_loss
+                raw_model = _unwrap_model_for_state_dict(model)
+                best_state = {
+                    k: v.detach().cpu() for k, v in raw_model.state_dict().items()
+                }
+                epochs_without_improvement = 0
+            else:
+                epochs_without_improvement += 1
 
-        if early_patience > 0 and epochs_without_improvement >= early_patience:
             print(
-                f"Early stopping: no val improvement for {epochs_without_improvement} epoch(s) (patience={early_patience})."
+                f"Epoch {epoch:03d}: train_loss={avg_train_loss:.6f} val_loss={avg_val_loss:.6f}"
             )
-            break
+            if profile_enabled:
+                print(
+                    _timing_summary(
+                        f"[profile][epoch={epoch:03d}]", prof_totals, prof_count
+                    )
+                )
+
+            if clr_enabled and clr_every > 0 and (epoch % clr_every == 0):
+                clr_max_lr *= clr_gamma
+
+            if early_patience > 0 and epochs_without_improvement >= early_patience:
+                print(
+                    f"Early stopping: no val improvement for {epochs_without_improvement} epoch(s) (patience={early_patience})."
+                )
+                break
 
     if best_state is not None:
         raw_model = _unwrap_model_for_state_dict(model)
