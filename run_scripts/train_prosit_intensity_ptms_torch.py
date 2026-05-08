@@ -38,6 +38,7 @@ from typing import Iterable
 # -----------------------------------------------------------------------------
 repo_root = Path(__file__).resolve().parent.parent
 HF_CACHE_ROOT = (repo_root / ".hf").expanduser()
+DATA_ROOT = (repo_root / "data").expanduser()
 # or set HF_CACHE_ROOT = Path("/path/to/your/cache").expanduser() for a custom location
 # If ran within container it will refer to the container root
 
@@ -45,7 +46,8 @@ hf_root = Path(os.environ.get("HF_HOME", str(HF_CACHE_ROOT))).expanduser()
 hf_datasets_cache = Path(
     os.environ.get("HF_DATASETS_CACHE", str(hf_root / "datasets"))
 ).expanduser()
-hf_hub_cache = Path(os.environ.get("HF_HUB_CACHE", str(hf_root / "hub"))).expanduser()
+hf_hub_cache = Path(os.environ.get("HF_HUB_CACHE", str(hf_root / "hub"))
+).expanduser()
 
 hf_datasets_cache.mkdir(parents=True, exist_ok=True)
 hf_hub_cache.mkdir(parents=True, exist_ok=True)
@@ -53,6 +55,10 @@ hf_hub_cache.mkdir(parents=True, exist_ok=True)
 os.environ.setdefault("HF_HOME", str(hf_root))
 os.environ.setdefault("HF_DATASETS_CACHE", str(hf_datasets_cache))
 os.environ.setdefault("HF_HUB_CACHE", str(hf_hub_cache))
+
+data_root = Path(os.environ.get("DATA_HOME", str(DATA_ROOT))).expanduser()
+data_location = Path(os.environ.get("DATA_LOCATION", str(data_root / "data"))
+).expanduser()
 
 os.environ.setdefault("DLOMIX_BACKEND", "torch")
 
@@ -72,9 +78,9 @@ from dlomix.models import PrositIntensityPredictor
 #     "Learning the Unseen: Data-Augmented Deep Learning for PTM Discovery with Prosit-PTM"
 CONFIG = {
     # Path within container, remember to define the path names when creating the image
-    "train": "/data/all_train_ptms_fixed_na.parquet",
-    "val": "/data/val_ptms_fixed_na.parquet",
-    "test": "/data/test.parquet",
+    "train": f"{str(data_location)}/all_train_ptms_fixed_na.parquet",
+    "val": f"{str(data_location)}/val_ptms_fixed_na.parquet",
+    "test": f"{str(data_location)}/test.parquet",
     # --- Training loop (evidence: `run_scripts/run_prosit_intensity_torch.py`,
     # `run_scripts/run_prosit_intensity_ptms_torch.py`, and TF scripts) ---
     "epochs": 120,  # according to (2) PROSIT-PTM (FII: max 120 epochs with early stopping)

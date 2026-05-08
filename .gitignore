@@ -1,12 +1,12 @@
 # Ignore data files
-/prospect_data/*.parquet
-/prospect_data/processed/
+storage/
 
 # Ignore VSCode folder
 .vscode/
 
-# Ignore the container def file
+# Ignore container files
 container.def
+dlomix_container.sif
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
