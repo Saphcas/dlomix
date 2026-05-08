@@ -100,7 +100,7 @@ CONFIG = {
     "shuffle": True,
     "shuffle_buffer_size": 10_000,
     "parquet_read_batch_size": 50_000,
-    "num_workers": 8,
+    "num_workers": 4, # Alvis T4 only has 4 workers available
     "pin_memory": True,
     "persistent_workers": False,
     "prefetch_factor": 1,
