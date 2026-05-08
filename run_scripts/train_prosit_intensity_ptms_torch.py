@@ -79,7 +79,7 @@ from dlomix.models import PrositIntensityPredictor
 CONFIG = {
     # Path within container, remember to define the path names when creating the image
     "train": f"{str(data_location)}/all_train_ptms_fixed_na.parquet",
-    "val": f"{str(data_location)}/val_ptms_fixed_na.parquet",
+    "val": f"{str(data_location)}/all_val_ptms_fixed_na.parquet",
     "test": f"{str(data_location)}/test.parquet",
     # --- Training loop (evidence: `run_scripts/run_prosit_intensity_torch.py`,
     # `run_scripts/run_prosit_intensity_ptms_torch.py`, and TF scripts) ---
