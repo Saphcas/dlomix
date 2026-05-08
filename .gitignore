@@ -5,7 +5,7 @@ storage/
 .vscode/
 
 # Ignore container files
-container.def
+dlomix_container.def
 dlomix_container.sif
 
 # Byte-compiled / optimized / DLL files
