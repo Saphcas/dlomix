@@ -4,9 +4,8 @@ storage/
 # Ignore VSCode folder
 .vscode/
 
-# Ignore container files
-dlomix_container.def
-dlomix_container.sif
+# Ignore container files (size), but not bash scripts
+alvis/container/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
