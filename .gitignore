@@ -4,8 +4,8 @@ storage/
 # Ignore VSCode folder
 .vscode/
 
-# Ignore container files (size), but not bash scripts
-alvis/container/
+# Ignore container files, but not bash scripts
+alvis/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
