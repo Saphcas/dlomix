@@ -64,6 +64,7 @@ os.environ.setdefault("DLOMIX_BACKEND", "torch")
 
 import torch
 from tqdm.auto import tqdm
+import wandb
 
 from dlomix.data import StreamingFragmentIonIntensityDataset
 from dlomix.losses.intensity_torch import masked_spectral_distance, gaussian_nll
@@ -593,6 +594,28 @@ def main() -> int:
     device = _device_from_torch()
     print(f"Using device: {device}")
 
+    # Initialize wandb
+    if args.uncertainty_aware:
+        run = wandb.init(
+            entity="kall",
+            project="prosit_uncertainty_aware",
+            config={
+                "learning_rate": args.lr,
+                "dataset":"PROSPECT",
+                "epochs":args.epochs,
+            }
+        )
+    else:
+        run = wandb.init(
+            entity="kall",
+            project="prosit_standard",
+            config={
+                "learning_rate": args.lr,
+                "dataset":"PROSPECT",
+                "epochs":args.epochs,
+            }
+        )
+
     if device.type == "cuda":
         try:
             if hasattr(torch, "set_float32_matmul_precision"):
@@ -958,6 +981,7 @@ def main() -> int:
                         break
             avg_val_loss = val_loss_total / max(1, val_batches)
 
+            # As negative log likelihood will generate a negative number (unless I've misunderstood) if avg is higher than best there's been no improvement
             if avg_val_loss < best_val_loss:
                 best_val_loss = avg_val_loss
                 raw_model = _unwrap_model_for_state_dict(model)
@@ -977,6 +1001,10 @@ def main() -> int:
                         f"[profile][epoch={epoch:03d}]", prof_totals, prof_count
                     )
                 )
+            run.log({
+            "average-train-loss":avg_train_loss, 
+            "average-validation-loss":avg_val_loss,
+            })
 
             if clr_enabled and clr_every > 0 and (epoch % clr_every == 0):
                 clr_max_lr *= clr_gamma
@@ -1173,6 +1201,10 @@ def main() -> int:
                         f"[profile][epoch={epoch:03d}]", prof_totals, prof_count
                     )
                 )
+            run.log({
+            "average-train-loss":avg_train_loss, 
+            "average-validation-loss":avg_val_loss,
+            })
 
             if clr_enabled and clr_every > 0 and (epoch % clr_every == 0):
                 clr_max_lr *= clr_gamma
@@ -1220,6 +1252,8 @@ def main() -> int:
 
     if profile_enabled:
         print(_timing_summary("[profile][final]", prof_totals, prof_count))
+
+    run.finish()
 
     return 0
 
