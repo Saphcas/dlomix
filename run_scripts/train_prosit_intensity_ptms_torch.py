@@ -122,7 +122,7 @@ CONFIG = {
     "max_val_batches": 0,
     "max_test_batches": 0,
     "save": None,
-    "checkpoint_save": os.environ.get("CHECKPOINT", None), # Give as /path/to/dir
+    "checkpoint_save": os.environ.get("CHECKPOINT_DIR", None), # Give as /path/to/dir
     # --- Optional torch.compile acceleration ---
     "use_torch_compile": False,
     "torch_compile_backend": "inductor",
