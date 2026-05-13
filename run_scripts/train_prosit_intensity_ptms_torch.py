@@ -122,6 +122,7 @@ CONFIG = {
     "max_val_batches": 0,
     "max_test_batches": 0,
     "save": None,
+    "checkpoint_save": os.environ.get("CHECKPOINT", None), # Give as /path/to/dir
     # --- Optional torch.compile acceleration ---
     "use_torch_compile": False,
     "torch_compile_backend": "inductor",
@@ -628,6 +629,7 @@ def main() -> int:
                 "max_val_batches": args.max_val_batches,
                 "max_test_batches": args.max_test_batches,
                 "save": args.save,
+                "checkpoint_save": args.checkpoint_save,
                 "use_torch_compile": args.use_torch_compile,
                 "torch_compile_backend": args.torch_compile_backend,
                 "torch_compile_mode": args.torch_compile_mode,
@@ -686,6 +688,7 @@ def main() -> int:
                 "max_val_batches": args.max_val_batches,
                 "max_test_batches": args.max_test_batches,
                 "save": args.save,
+                "checkpoint_save": args.checkpoint_save,
                 "use_torch_compile": args.use_torch_compile,
                 "torch_compile_backend": args.torch_compile_backend,
                 "torch_compile_mode": args.torch_compile_mode,
@@ -911,6 +914,9 @@ def main() -> int:
             f"log_every={profile_log_every}, cuda_sync={profile_cuda_sync})"
         )
     if args.uncertainty_aware:
+        # Create additional directory for specifying uncertainty aware model checkpoints
+        if args.checkpoint_save:
+            os.makedirs(os.path.dirname(f"{args.checkpoint_save}/ua"), exist_ok=True)
         for epoch in range(1, args.epochs + 1):
             model.train()
             train_loss_total = 0.0
@@ -1168,6 +1174,19 @@ def main() -> int:
                 "epoch_average_validation_spectral_angle": avg_val_sa,
             })
 
+            if args.checkpoint_save:
+                torch.save(
+                    {
+                        "uncertainty_aware": args.uncertainty_aware,
+                        "epoch": epoch,
+                        "model_state_dict": model.state_dict(),
+                        "optimizer_state_dict": optimizer.state_dict(),
+                        "train_loss": avg_train_loss,
+                        "val_loss": avg_val_loss,
+                    },
+                    f"{args.checkpoint_save}/ua/checkpoint_epoch_{epoch}.pth",
+                )
+
             if clr_enabled and clr_every > 0 and (epoch % clr_every == 0):
                 clr_max_lr *= clr_gamma
 
@@ -1177,6 +1196,9 @@ def main() -> int:
                 )
                 break
     else:
+        # Create additional directory for specifying standard model checkpoints
+        if args.checkpoint_save:
+            os.makedirs(os.path.dirname(f"{args.checkpoint_save}/msd"), exist_ok=True)
         for epoch in range(1, args.epochs + 1):
             model.train()
             train_loss_total = 0.0
@@ -1404,7 +1426,7 @@ def main() -> int:
                         f"[profile][epoch={epoch:03d}]", prof_totals, prof_count
                     )
                 )
-                
+
             run.log({
                 "epoch": epoch,
                 "epoch_average_train_loss": avg_train_loss, 
@@ -1414,6 +1436,19 @@ def main() -> int:
                 "epoch_average_validation_absolute_error": avg_val_mae,
                 "epoch_average_validation_spectral_angle": avg_val_sa,
             })
+
+            if args.checkpoint_save:
+                torch.save(
+                    {
+                        "uncertainty_aware": args.uncertainty_aware,
+                        "epoch": epoch,
+                        "model_state_dict": model.state_dict(),
+                        "optimizer_state_dict": optimizer.state_dict(),
+                        "train_loss": avg_train_loss,
+                        "val_loss": avg_val_loss,
+                    },
+                    f"{args.checkpoint_save}/msd/checkpoint_epoch_{epoch}.pth",
+                )
 
             if clr_enabled and clr_every > 0 and (epoch % clr_every == 0):
                 clr_max_lr *= clr_gamma
