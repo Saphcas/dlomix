@@ -65,6 +65,7 @@ os.environ.setdefault("DLOMIX_BACKEND", "torch")
 import torch
 from tqdm.auto import tqdm
 import wandb
+import numpy as np
 
 from dlomix.data import StreamingFragmentIonIntensityDataset
 from dlomix.losses.intensity_torch import masked_spectral_distance, gaussian_nll
@@ -599,13 +600,62 @@ def main() -> int:
         run = wandb.init(
             entity="kall",
             project="prosit_uncertainty_aware",
+            # If additional config variables are uncommented under CONFIG add them here
             config={
                 "learning_rate": args.lr,
                 "dataset":"PROSPECT",
                 "epochs":args.epochs,
+                "uncertainty_aware": args.uncertainty_aware, 
+                "batch_size": args.batch_size,
+                "max_seq_len": args.max_seq_len, 
+                "shuffle": args.shuffle,
+                "shuffle_buffer_size": args.shuffle_buffer_size,
+                "parquet_read_batch_size": args.parquet_read_batch_size,
+                "num_workers": args.num_workers,
+                "pin_memory": args.pin_memory,
+                "persistent_workers": args.persistent_workers,
+                "prefetch_factor": args.prefetch_factor,
+                "in_order": args.in_order,
+                "with_termini": args.with_termini,
+                "encoding_scheme": args.encoding_scheme,
+                "sequence_column": args.sequence_column,
+                "label_column": args.label_column,
+                "collision_energy_column": args.collision_energy_column,
+                "precursor_charge_column": args.precursor_charge_column,
+                "ptm_features": args.ptm_features,
+                "debug_unknown_tokens": args.debug_unknown_tokens,
+                "max_train_batches": args.max_train_batches,
+                "max_val_batches": args.max_val_batches,
+                "max_test_batches": args.max_test_batches,
+                "save": args.save,
+                "use_torch_compile": args.use_torch_compile,
+                "torch_compile_backend": args.torch_compile_backend,
+                "torch_compile_mode": args.torch_compile_mode,
+                "torch_compile_fullgraph": args.torch_compile_fullgraph,
+                "torch_compile_dynamic": args.torch_compile_dynamic,
+                "use_amp": args.use_amp,
+                "amp_dtype": args.amp_dtype,
+                "enable_tf32": args.enable_tf32,
+                "float32_matmul_precision": args.float32_matmul_precision,
+                "profile_timing": args.profile_timing,
+                "profile_warmup_batches": args.profile_warmup_batches,
+                "profile_num_batches": args.profile_num_batches,
+                "profile_log_every": args.profile_log_every,
+                "profile_cuda_sync": args.profile_cude_sync,
+                "profile_dataloader_only_batches": args.profile_dataloader_only_batches,
+                "profile_dataloader_move_to_device": args.profile_dataloader_move_to_device,
+                "grad_clip_max_norm": args.grad_clip_max_norm,
+                "use_clr": args.use_clr,
+                "clr_base_lr": args.clr_base_lr,
+                "clr_max_lr": args.clr_max_lr,
+                "clr_scale_gamma": args.clr_scale_gamma,
+                "clr_scale_every_epochs": args.clr_scale_every_epochs,
+                "early_stopping_patience": args.early_stopping_patience,
+                "dropout_rate": args.dropout_rate,
             }
         )
     else:
+        # If additional config variables are uncommented under CONFIG add them here
         run = wandb.init(
             entity="kall",
             project="prosit_standard",
@@ -613,6 +663,53 @@ def main() -> int:
                 "learning_rate": args.lr,
                 "dataset":"PROSPECT",
                 "epochs":args.epochs,
+                "uncertainty_aware": args.uncertainty_aware, 
+                "batch_size": args.batch_size,
+                "max_seq_len": args.max_seq_len, 
+                "shuffle": args.shuffle,
+                "shuffle_buffer_size": args.shuffle_buffer_size,
+                "parquet_read_batch_size": args.parquet_read_batch_size,
+                "num_workers": args.num_workers,
+                "pin_memory": args.pin_memory,
+                "persistent_workers": args.persistent_workers,
+                "prefetch_factor": args.prefetch_factor,
+                "in_order": args.in_order,
+                "with_termini": args.with_termini,
+                "encoding_scheme": args.encoding_scheme,
+                "sequence_column": args.sequence_column,
+                "label_column": args.label_column,
+                "collision_energy_column": args.collision_energy_column,
+                "precursor_charge_column": args.precursor_charge_column,
+                "ptm_features": args.ptm_features,
+                "debug_unknown_tokens": args.debug_unknown_tokens,
+                "max_train_batches": args.max_train_batches,
+                "max_val_batches": args.max_val_batches,
+                "max_test_batches": args.max_test_batches,
+                "save": args.save,
+                "use_torch_compile": args.use_torch_compile,
+                "torch_compile_backend": args.torch_compile_backend,
+                "torch_compile_mode": args.torch_compile_mode,
+                "torch_compile_fullgraph": args.torch_compile_fullgraph,
+                "torch_compile_dynamic": args.torch_compile_dynamic,
+                "use_amp": args.use_amp,
+                "amp_dtype": args.amp_dtype,
+                "enable_tf32": args.enable_tf32,
+                "float32_matmul_precision": args.float32_matmul_precision,
+                "profile_timing": args.profile_timing,
+                "profile_warmup_batches": args.profile_warmup_batches,
+                "profile_num_batches": args.profile_num_batches,
+                "profile_log_every": args.profile_log_every,
+                "profile_cuda_sync": args.profile_cude_sync,
+                "profile_dataloader_only_batches": args.profile_dataloader_only_batches,
+                "profile_dataloader_move_to_device": args.profile_dataloader_move_to_device,
+                "grad_clip_max_norm": args.grad_clip_max_norm,
+                "use_clr": args.use_clr,
+                "clr_base_lr": args.clr_base_lr,
+                "clr_max_lr": args.clr_max_lr,
+                "clr_scale_gamma": args.clr_scale_gamma,
+                "clr_scale_every_epochs": args.clr_scale_every_epochs,
+                "early_stopping_patience": args.early_stopping_patience,
+                "dropout_rate": args.dropout_rate,
             }
         )
 
@@ -817,6 +914,8 @@ def main() -> int:
         for epoch in range(1, args.epochs + 1):
             model.train()
             train_loss_total = 0.0
+            train_mean_absolute_error_total = 0.0
+            train_spectral_angle_total = 0.0
             train_batches = 0
             loop_end = time.perf_counter()
 
@@ -935,6 +1034,31 @@ def main() -> int:
                 train_batches += 1
                 train_it.set_postfix(loss=f"{loss.item():.4f}")
 
+                # Use the mean as an approximation of y_pred for mean absolute error and spectral angle approximation
+                mean_batch_absolute_error = torch.mean(torch.abs(torch.sub(batch[columns.label] - pred_mean)))
+                # Mean spectral angle calculation (just 1 - loss value for standard prosit)
+                epsilon = 1e-7
+                pred_masked = ((batch[columns.label] + 1) * pred_mean) / (batch[columns.label] + 1 + epsilon)
+                true_masked = ((batch[columns.label] + 1) * batch[columns.label]) / (batch[columns.label] + 1 + epsilon)
+                true_norm = torch.nn.functional.normalize(true_masked, p=2, dim=-1)
+                pred_norm = torch.nn.functional.normalize(pred_masked, p=2, dim=-1)
+                product = (pred_norm * true_norm).sum(dim=-1)
+                product = torch.clamp(product, -1.0 + epsilon, 1.0 - epsilon)
+                arccos = torch.arccos(product)
+                mean_spectral_angle = 1 - torch.mean(2 * arccos / np.pi)
+
+                train_mean_absolute_error_total += mean_batch_absolute_error
+                train_spectral_angle_total += mean_spectral_angle
+
+                run.log({
+                    "train_batch": train_batches,
+                    "train_batch_loss": loss.item(),
+                    "train_loss_total": train_loss_total,
+                    "current_epoch_average_train_loss": train_loss_total / max(1, train_batches),
+                    "train_mean_batch_absolute_error": mean_batch_absolute_error,
+                    "train_mean_batch_spectral_angle": mean_spectral_angle,
+                })
+
                 iter_end = time.perf_counter()
                 if do_profile:
                     prof_totals["data_wait_s"] += data_wait_s
@@ -955,10 +1079,14 @@ def main() -> int:
                     break
 
             avg_train_loss = train_loss_total / max(1, train_batches)
+            avg_train_mae = train_mean_absolute_error_total / max(1, train_batches)
+            avg_train_sa = train_spectral_angle_total / max(1, train_batches)
 
             # Validation
             model.eval()
             val_loss_total = 0.0
+            val_mean_absolute_error_total = 0.0
+            val_spectral_angle_total = 0.0
             val_batches = 0
             with torch.no_grad():
                 val_it = tqdm(
@@ -976,10 +1104,38 @@ def main() -> int:
                         val_loss = gaussian_nll(batch[columns.label], pred_mean, pred_var, pred_missingness)
                     val_loss_total += val_loss.item()
                     val_batches += 1
+                    
+                    # Use the mean as an approximation of y_pred for mean absolute error and spectral angle approximation
+                    mean_batch_absolute_error = torch.mean(torch.abs(torch.sub(batch[columns.label] - pred_mean)))
+                    # Mean spectral angle calculation (just 1 - loss value for standard prosit)
+                    epsilon = 1e-7
+                    pred_masked = ((batch[columns.label] + 1) * pred_mean) / (batch[columns.label] + 1 + epsilon)
+                    true_masked = ((batch[columns.label] + 1) * batch[columns.label]) / (batch[columns.label] + 1 + epsilon)
+                    true_norm = torch.nn.functional.normalize(true_masked, p=2, dim=-1)
+                    pred_norm = torch.nn.functional.normalize(pred_masked, p=2, dim=-1)
+                    product = (pred_norm * true_norm).sum(dim=-1)
+                    product = torch.clamp(product, -1.0 + epsilon, 1.0 - epsilon)
+                    arccos = torch.arccos(product)
+                    mean_spectral_angle = 1 - torch.mean(2 * arccos / np.pi)
+
+                    val_mean_absolute_error_total += mean_batch_absolute_error
+                    val_spectral_angle_total += mean_spectral_angle
+
+                    run.log({
+                        "val_batch": val_batches,
+                        "val_batch_loss": val_loss.item(),
+                        "val_loss_total": val_loss_total,
+                        "current_epoch_average_val_loss": val_loss_total / max(1, val_batches),
+                        "val_mean_batch_absolute_error": mean_batch_absolute_error,
+                        "val_mean_batch_spectral_angle": mean_spectral_angle,
+                    })
+
                     val_it.set_postfix(loss=f"{val_loss.item():.4f}")
                     if args.max_val_batches and val_batches >= args.max_val_batches:
                         break
             avg_val_loss = val_loss_total / max(1, val_batches)
+            avg_val_mae = val_mean_absolute_error_total / max(1, val_batches)
+            avg_val_sa = val_spectral_angle_total / max(1, val_batches)
 
             # As negative log likelihood will generate a negative number (unless I've misunderstood) if avg is higher than best there's been no improvement
             if avg_val_loss < best_val_loss:
@@ -1001,9 +1157,15 @@ def main() -> int:
                         f"[profile][epoch={epoch:03d}]", prof_totals, prof_count
                     )
                 )
+            
             run.log({
-            "average-train-loss":avg_train_loss, 
-            "average-validation-loss":avg_val_loss,
+                "epoch": epoch,
+                "epoch_average_train_loss": avg_train_loss, 
+                "epoch_average_train_absolute_error": avg_train_mae,
+                "epoch_average_train_spectral_angle": avg_train_sa,
+                "epoch_average_validation_loss": avg_val_loss,
+                "epoch_average_validation_absolute_error": avg_val_mae,
+                "epoch_average_validation_spectral_angle": avg_val_sa,
             })
 
             if clr_enabled and clr_every > 0 and (epoch % clr_every == 0):
@@ -1018,6 +1180,8 @@ def main() -> int:
         for epoch in range(1, args.epochs + 1):
             model.train()
             train_loss_total = 0.0
+            train_mean_absolute_error_total = 0.0
+            train_spectral_angle_total = 0.0
             train_batches = 0
             loop_end = time.perf_counter()
 
@@ -1135,7 +1299,24 @@ def main() -> int:
                 train_loss_total += loss.item()
                 train_batches += 1
                 train_it.set_postfix(loss=f"{loss.item():.4f}")
+                
+                # Use the mean as an approximation of y_pred for mean absolute error and spectral angle approximation
+                mean_batch_absolute_error = torch.mean(torch.abs(torch.sub(batch[columns.label] - pred_mean)))
+                # Mean adjusted spectral angle calculation (just 1 - loss value for standard prosit)
+                mean_spectral_angle = 1 - loss
 
+                train_mean_absolute_error_total += mean_batch_absolute_error
+                train_spectral_angle_total += mean_spectral_angle
+
+                run.log({
+                    "train_batch": train_batches,
+                    "train_batch_loss": loss.item(),
+                    "train_loss_total": train_loss_total,
+                    "current_epoch_average_train_loss": train_loss_total / max(1, train_batches),
+                    "train_mean_batch_absolute_error": mean_batch_absolute_error,
+                    "train_mean_batch_spectral_angle": mean_spectral_angle,
+                })
+                
                 iter_end = time.perf_counter()
                 if do_profile:
                     prof_totals["data_wait_s"] += data_wait_s
@@ -1156,6 +1337,8 @@ def main() -> int:
                     break
 
             avg_train_loss = train_loss_total / max(1, train_batches)
+            avg_train_mae = train_mean_absolute_error_total / max(1, train_batches)
+            avg_train_sa = train_spectral_angle_total / max(1, train_batches)
 
             # Validation
             model.eval()
@@ -1177,10 +1360,30 @@ def main() -> int:
                         val_loss = masked_spectral_distance(batch[columns.label], pred)
                     val_loss_total += val_loss.item()
                     val_batches += 1
+
+                    # Use the mean as an approximation of y_pred for mean absolute error and spectral angle approximation
+                    mean_batch_absolute_error = torch.mean(torch.abs(torch.sub(batch[columns.label] - pred_mean)))
+                    # Mean spectral angle calculation (just 1 - loss value for standard prosit)
+                    mean_spectral_angle = 1 - loss
+
+                    val_mean_absolute_error_total += mean_batch_absolute_error
+                    val_spectral_angle_total += mean_spectral_angle
+
+                    run.log({
+                        "val_batch": val_batches,
+                        "val_batch_loss": val_loss.item(),
+                        "val_loss_total": val_loss_total,
+                        "current_epoch_average_val_loss": val_loss_total / max(1, val_batches),
+                        "val_mean_batch_absolute_error": mean_batch_absolute_error,
+                        "val_mean_batch_spectral_angle": mean_spectral_angle,
+                    })
+
                     val_it.set_postfix(loss=f"{val_loss.item():.4f}")
                     if args.max_val_batches and val_batches >= args.max_val_batches:
                         break
             avg_val_loss = val_loss_total / max(1, val_batches)
+            avg_val_mae = val_mean_absolute_error_total / max(1, val_batches)
+            avg_val_sa = val_spectral_angle_total / max(1, val_batches)
 
             if avg_val_loss < best_val_loss:
                 best_val_loss = avg_val_loss
@@ -1201,9 +1404,15 @@ def main() -> int:
                         f"[profile][epoch={epoch:03d}]", prof_totals, prof_count
                     )
                 )
+                
             run.log({
-            "average-train-loss":avg_train_loss, 
-            "average-validation-loss":avg_val_loss,
+                "epoch": epoch,
+                "epoch_average_train_loss": avg_train_loss, 
+                "epoch_average_train_absolute_error": avg_train_mae,
+                "epoch_average_train_spectral_angle": avg_train_sa,
+                "epoch_average_validation_loss": avg_val_loss,
+                "epoch_average_validation_absolute_error": avg_val_mae,
+                "epoch_average_validation_spectral_angle": avg_val_sa,
             })
 
             if clr_enabled and clr_every > 0 and (epoch % clr_every == 0):
@@ -1224,31 +1433,59 @@ def main() -> int:
             print(f"Saved best model to: {args.save}")
 
     # Test
-    if test_path is not None:
-        model.eval()
-        test_loss_total = 0.0
-        test_batches = 0
-        with torch.no_grad():
-            test_it = tqdm(
-                dataset.tensor_test_data,
-                total=test_steps_est,
-                desc="Test",
-                unit="batch",
-                leave=False,
-            )
-            for batch in test_it:
-                batch = _move_batch_to_device(batch, device)
-                batch = _cast_batch_types(batch, columns)
-                with _amp_autocast_context(device, amp_enabled, amp_dtype):
-                    pred = model(batch)
-                    test_loss = masked_spectral_distance(batch[columns.label], pred)
-                test_loss_total += test_loss.item()
-                test_batches += 1
-                test_it.set_postfix(loss=f"{test_loss.item():.4f}")
-                if args.max_test_batches and test_batches >= args.max_test_batches:
-                    break
-        avg_test_loss = test_loss_total / max(1, test_batches)
-        print(f"Test loss: {avg_test_loss:.6f}")
+    if args.uncertainty_aware:
+        if test_path is not None:
+            model.eval()
+            test_loss_total = 0.0
+            test_batches = 0
+            with torch.no_grad():
+                test_it = tqdm(
+                    dataset.tensor_test_data,
+                    total=test_steps_est,
+                    desc="Test",
+                    unit="batch",
+                    leave=False,
+                )
+                for batch in test_it:
+                    batch = _move_batch_to_device(batch, device)
+                    batch = _cast_batch_types(batch, columns)
+                    with _amp_autocast_context(device, amp_enabled, amp_dtype):
+                        pred_mean, pred_var, pred_missingness = model(batch)
+                        test_loss = gaussian_nll(batch[columns.label], pred_mean, pred_var, pred_missingness)
+                    test_loss_total += test_loss.item()
+                    test_batches += 1
+                    test_it.set_postfix(loss=f"{test_loss.item():.4f}")
+                    if args.max_test_batches and test_batches >= args.max_test_batches:
+                        break
+            avg_test_loss = test_loss_total / max(1, test_batches)
+            print(f"Test loss: {avg_test_loss:.6f}")
+    else:
+        if test_path is not None:
+            model.eval()
+            test_loss_total = 0.0
+            test_batches = 0
+            with torch.no_grad():
+                test_it = tqdm(
+                    dataset.tensor_test_data,
+                    total=test_steps_est,
+                    desc="Test",
+                    unit="batch",
+                    leave=False,
+                )
+                for batch in test_it:
+                    batch = _move_batch_to_device(batch, device)
+                    batch = _cast_batch_types(batch, columns)
+                    with _amp_autocast_context(device, amp_enabled, amp_dtype):
+                        pred = model(batch)
+                        test_loss = masked_spectral_distance(batch[columns.label], pred)
+                    test_loss_total += test_loss.item()
+                    test_batches += 1
+                    test_it.set_postfix(loss=f"{test_loss.item():.4f}")
+                    if args.max_test_batches and test_batches >= args.max_test_batches:
+                        break
+            avg_test_loss = test_loss_total / max(1, test_batches)
+            print(f"Test loss: {avg_test_loss:.6f}")
+        
 
     if profile_enabled:
         print(_timing_summary("[profile][final]", prof_totals, prof_count))
