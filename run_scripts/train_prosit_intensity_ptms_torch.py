@@ -170,6 +170,7 @@ CONFIG = {
     # --- PROSIT-PTM architecture notes (paper hyperparameters; informational) ---
     # "ptm_mlp_units": (1024, 64, 16),  # according to (2) PROSIT-PTM (PTM feature MLP sizes)
     # "decoder_dropout_rate": 0.5,  # according to (2) PROSIT-PTM (decoder dropout differs from encoder dropout)
+    "wandb_run_name": os.environ.get(str("WANDB_NAME")),
 }
 
 
@@ -601,6 +602,7 @@ def main() -> int:
         run = wandb.init(
             entity="kall",
             project="prosit_uncertainty_aware",
+            name=args.wandb_run_name,
             # If additional config variables are uncommented under CONFIG add them here
             config={
                 "learning_rate": args.lr,
@@ -657,10 +659,11 @@ def main() -> int:
             }
         )
     else:
-        # If additional config variables are uncommented under CONFIG add them here
         run = wandb.init(
             entity="kall",
-            project="prosit_standard",
+            project="prosit_uncertainty_aware",
+            name=args.wandb_run_name,
+            # If additional config variables are uncommented under CONFIG add them here
             config={
                 "learning_rate": args.lr,
                 "dataset":"PROSPECT",
