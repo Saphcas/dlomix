@@ -1366,6 +1366,8 @@ def main() -> int:
             # Validation
             model.eval()
             val_loss_total = 0.0
+            val_mean_absolute_error_total = 0.0
+            val_spectral_angle_total = 0.0
             val_batches = 0
             with torch.no_grad():
                 val_it = tqdm(
