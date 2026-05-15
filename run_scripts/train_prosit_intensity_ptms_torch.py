@@ -92,7 +92,7 @@ CONFIG = {
     # "epochs": 2,  # useful for debugging
     # "epochs": 20,  # evidence: `run_scripts/run_prosit_intensity_torch.py`, `run_scripts/run_prosit_intensity_ptms_torch.py`
     # "epochs": 32,  # according to (1) PROSIT (paper reports 32 epochs)
-    "batch_size": 2048,  # reasonable laptop default; (2) PROSIT-PTM excerpt doesn't specify FII batch size
+    "batch_size": 1024,  # reasonable laptop default; (2) PROSIT-PTM excerpt doesn't specify FII batch size
     # "batch_size": 8,  # evidence: PTM torch example uses 8
     # "batch_size": 128,  # evidence: non-PTM torch example + TF PTM script use 128
     # "batch_size": 512,  # according to (1) PROSIT (paper reports batch size 512)
@@ -124,7 +124,7 @@ CONFIG = {
     "save": None,
     "checkpoint_save": os.environ.get("CHECKPOINT_DIR", None), # Give as /path/to/dir
     # --- Optional torch.compile acceleration ---
-    "use_torch_compile": True,
+    "use_torch_compile": False,
     "torch_compile_backend": "inductor",
     "torch_compile_mode": "reduce-overhead",
     "torch_compile_fullgraph": False,
