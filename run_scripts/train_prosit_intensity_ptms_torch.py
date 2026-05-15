@@ -598,7 +598,7 @@ def main() -> int:
     print(f"Using device: {device}")
 
     # Initialize wandb
-    if args.uncertainty_aware:
+    if args.uncertainty_aware == True:
         run = wandb.init(
             entity="kall",
             project="prosit_uncertainty_aware",
@@ -806,7 +806,7 @@ def main() -> int:
     if int(getattr(args, "profile_dataloader_only_batches", 0) or 0) > 0:
         return 0
 
-    if args.uncertainty_aware:
+    if args.uncertainty_aware == True:
         model = PrositIntensityUncertaintyPredictor(
             seq_length=args.max_seq_len,
             **{
@@ -916,7 +916,7 @@ def main() -> int:
             f"[profile] enabled (warmup={profile_warmup}, sample_batches={profile_num_batches}, "
             f"log_every={profile_log_every}, cuda_sync={profile_cuda_sync})"
         )
-    if args.uncertainty_aware:
+    if args.uncertainty_aware == True:
         # Create additional directory for specifying uncertainty aware model checkpoints
         if args.checkpoint_save:
             os.makedirs(os.path.dirname(f"{args.checkpoint_save}/ua"), exist_ok=True)
@@ -1475,7 +1475,7 @@ def main() -> int:
             print(f"Saved best model to: {args.save}")
 
     # Test
-    if args.uncertainty_aware:
+    if args.uncertainty_aware == True:
         if test_path is not None:
             model.eval()
             test_loss_total = 0.0
