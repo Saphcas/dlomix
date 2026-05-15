@@ -1046,18 +1046,18 @@ def main() -> int:
                 # Use the mean as an approximation of y_pred for mean absolute error and spectral angle approximation
                 mean_batch_absolute_error = torch.mean(torch.abs(torch.sub(batch[columns.label], pred_mean)))
                 # Mean spectral angle calculation (just 1 - loss value for standard prosit)
-                epsilon = 1e-7
-                pred_masked = ((batch[columns.label] + 1) * pred_mean) / (batch[columns.label] + 1 + epsilon)
-                true_masked = ((batch[columns.label] + 1) * batch[columns.label]) / (batch[columns.label] + 1 + epsilon)
-                true_norm = torch.nn.functional.normalize(true_masked, p=2, dim=-1)
-                pred_norm = torch.nn.functional.normalize(pred_masked, p=2, dim=-1)
-                product = (pred_norm * true_norm).sum(dim=-1)
-                product = torch.clamp(product, -1.0 + epsilon, 1.0 - epsilon)
-                arccos = torch.arccos(product)
-                mean_spectral_angle = 1 - torch.mean(2 * arccos / np.pi)
+                #epsilon = 1e-7
+                #pred_masked = ((batch[columns.label] + 1) * pred_mean) / (batch[columns.label] + 1 + epsilon)
+                #true_masked = ((batch[columns.label] + 1) * batch[columns.label]) / (batch[columns.label] + 1 + epsilon)
+                #true_norm = torch.nn.functional.normalize(true_masked, p=2, dim=-1)
+                #pred_norm = torch.nn.functional.normalize(pred_masked, p=2, dim=-1)
+                #product = (pred_norm * true_norm).sum(dim=-1)
+                #product = torch.clamp(product, -1.0 + epsilon, 1.0 - epsilon)
+                #arccos = torch.arccos(product)
+                #mean_spectral_angle = 1 - torch.mean(2 * arccos / np.pi)
 
                 train_mean_absolute_error_total += mean_batch_absolute_error
-                train_spectral_angle_total += mean_spectral_angle
+                #train_spectral_angle_total += mean_spectral_angle
 
                 run.log({
                     "train_batch": train_batches,
@@ -1065,7 +1065,7 @@ def main() -> int:
                     "train_loss_total": train_loss_total,
                     "current_epoch_average_train_loss": train_loss_total / max(1, train_batches),
                     "train_mean_batch_absolute_error": mean_batch_absolute_error,
-                    "train_mean_batch_spectral_angle": mean_spectral_angle,
+                    #"train_mean_batch_spectral_angle": mean_spectral_angle,
                 })
 
                 iter_end = time.perf_counter()
@@ -1089,7 +1089,7 @@ def main() -> int:
 
             avg_train_loss = train_loss_total / max(1, train_batches)
             avg_train_mae = train_mean_absolute_error_total / max(1, train_batches)
-            avg_train_sa = train_spectral_angle_total / max(1, train_batches)
+            #avg_train_sa = train_spectral_angle_total / max(1, train_batches)
 
             # Validation
             model.eval()
