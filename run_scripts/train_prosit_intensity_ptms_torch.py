@@ -917,9 +917,6 @@ def main() -> int:
             f"log_every={profile_log_every}, cuda_sync={profile_cuda_sync})"
         )
     if args.uncertainty_aware == True:
-        # Create additional directory for specifying uncertainty aware model checkpoints
-        if args.checkpoint_save:
-            os.makedirs(os.path.dirname(f"{args.checkpoint_save}/ua"), exist_ok=True)
         for epoch in range(1, args.epochs + 1):
             model.train()
             train_loss_total = 0.0
@@ -1191,7 +1188,7 @@ def main() -> int:
                         "train_loss": avg_train_loss,
                         "val_loss": avg_val_loss,
                     },
-                    f"{args.checkpoint_save}/ua/checkpoint_epoch_{epoch}.pth",
+                    f"{args.checkpoint_save}/checkpoint_epoch_{epoch}.pth",
                 )
 
             if clr_enabled and clr_every > 0 and (epoch % clr_every == 0):
@@ -1203,9 +1200,6 @@ def main() -> int:
                 )
                 break
     else:
-        # Create additional directory for specifying standard model checkpoints
-        if args.checkpoint_save:
-            os.makedirs(os.path.dirname(f"{args.checkpoint_save}/msd"), exist_ok=True)
         for epoch in range(1, args.epochs + 1):
             model.train()
             train_loss_total = 0.0
@@ -1393,7 +1387,7 @@ def main() -> int:
                     # pred is the predicted mean when using the spectral angle based loss function
                     mean_batch_absolute_error = torch.mean(torch.abs(torch.sub(batch[columns.label], pred))).item()
                     # Mean adjusted spectral angle calculation (just 1 - loss value for standard prosit)
-                    mean_spectral_angle = 1 - loss.item()
+                    mean_spectral_angle = 1 - val_loss.item()
 
                     val_mean_absolute_error_total += mean_batch_absolute_error
                     val_spectral_angle_total += mean_spectral_angle
@@ -1454,7 +1448,7 @@ def main() -> int:
                         "train_loss": avg_train_loss,
                         "val_loss": avg_val_loss,
                     },
-                    f"{args.checkpoint_save}/msd/checkpoint_epoch_{epoch}.pth",
+                    f"{args.checkpoint_save}/checkpoint_epoch_{epoch}.pth",
                 )
 
             if clr_enabled and clr_every > 0 and (epoch % clr_every == 0):
