@@ -124,7 +124,7 @@ CONFIG = {
     "save": None,
     "checkpoint_save": os.environ.get("CHECKPOINT_DIR", None), # Give as /path/to/dir
     # --- Optional torch.compile acceleration ---
-    "use_torch_compile": False,
+    "use_torch_compile": True,
     "torch_compile_backend": "inductor",
     "torch_compile_mode": "reduce-overhead",
     "torch_compile_fullgraph": False,
