@@ -88,11 +88,11 @@ CONFIG = {
     "uncertainty_aware": os.environ.get("UNCERTAINTY_AWARE", True),
     # --- Training loop (evidence: `run_scripts/run_prosit_intensity_torch.py`,
     # `run_scripts/run_prosit_intensity_ptms_torch.py`, and TF scripts) ---
-    "epochs": 120,  # according to (2) PROSIT-PTM (FII: max 120 epochs with early stopping)
+    "epochs": os.environ.get("N_EPOCHS", 120),  # according to (2) PROSIT-PTM (FII: max 120 epochs with early stopping)
     # "epochs": 2,  # useful for debugging
     # "epochs": 20,  # evidence: `run_scripts/run_prosit_intensity_torch.py`, `run_scripts/run_prosit_intensity_ptms_torch.py`
     # "epochs": 32,  # according to (1) PROSIT (paper reports 32 epochs)
-    "batch_size": 2048,  # reasonable laptop default; (2) PROSIT-PTM excerpt doesn't specify FII batch size
+    "batch_size": os.environ.get("BATCH_SIZE", 2048),  # reasonable laptop default; (2) PROSIT-PTM excerpt doesn't specify FII batch size
     # "batch_size": 8,  # evidence: PTM torch example uses 8
     # "batch_size": 128,  # evidence: non-PTM torch example + TF PTM script use 128
     # "batch_size": 512,  # according to (1) PROSIT (paper reports batch size 512)

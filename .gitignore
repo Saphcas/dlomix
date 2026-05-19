@@ -1,11 +1,10 @@
-# Ignore data files
-storage/
-
 # Ignore VSCode folder
 .vscode/
 
-# Ignore alvis files
+# Ignore local files
 alvis/
+storage/
+nn_learning/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
