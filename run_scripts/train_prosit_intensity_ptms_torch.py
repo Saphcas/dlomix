@@ -105,7 +105,7 @@ CONFIG = {
     "shuffle": True,
     "shuffle_buffer_size": 10_000,
     "parquet_read_batch_size": 50_000,
-    "num_workers": os.environ.get("NUM_WORKERS", 4), # Alvis T4 only has 4 workers available, A100 has 16
+    "num_workers": int(os.environ.get("NUM_WORKERS", 4)), # Alvis T4 only has 4 workers available, A100 has 16
     "pin_memory": True,
     "persistent_workers": False,
     "prefetch_factor": 1,
@@ -917,6 +917,7 @@ def main() -> int:
             f"log_every={profile_log_every}, cuda_sync={profile_cuda_sync})"
         )
     if args.uncertainty_aware == True:
+        print("Running uncertainty aware training")
         train_step = 0
         val_step = 0
         for epoch in range(1, args.epochs + 1):
@@ -1206,6 +1207,7 @@ def main() -> int:
                 )
                 break
     else:
+        print("Running standard training")
         train_step = 0
         val_step = 0
         for epoch in range(1, args.epochs + 1):
