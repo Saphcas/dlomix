@@ -85,7 +85,7 @@ CONFIG = {
     "val": f"{str(data_location)}/all_val_ptms_fixed_na.parquet",
     "test": f"{str(data_location)}/test.parquet",
     # Bool for model selection, false will use the current Prosit standard of masked spectral distance
-    "uncertainty_aware": os.environ.get("UNCERTAINTY_AWARE", True),
+    "uncertainty_aware": eval(os.environ.get("UNCERTAINTY_AWARE", True)),
     # --- Training loop (evidence: `run_scripts/run_prosit_intensity_torch.py`,
     # `run_scripts/run_prosit_intensity_ptms_torch.py`, and TF scripts) ---
     "epochs": int(os.environ.get("N_EPOCHS", 120)),  # according to (2) PROSIT-PTM (FII: max 120 epochs with early stopping)
