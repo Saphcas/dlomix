@@ -917,11 +917,13 @@ def main() -> int:
             f"log_every={profile_log_every}, cuda_sync={profile_cuda_sync})"
         )
     if args.uncertainty_aware == True:
+        train_step = 0
+        val_step = 0
         for epoch in range(1, args.epochs + 1):
             model.train()
             train_loss_total = 0.0
             train_mean_absolute_error_total = 0.0
-            train_spectral_angle_total = 0.0
+            train_mean_spectral_angle_total = 0.0
             train_batches = 0
             loop_end = time.perf_counter()
 
@@ -1056,15 +1058,17 @@ def main() -> int:
                 mean_spectral_angle = 1 - torch.mean(2 * arccos / np.pi).item()
 
                 train_mean_absolute_error_total += mean_batch_absolute_error
-                train_spectral_angle_total += mean_spectral_angle
+                train_mean_spectral_angle_total += mean_spectral_angle
+
+                train_step += 1
 
                 run.log({
-                    "train_batch": train_batches,
+                    "train_step": train_step,
                     "train_batch_loss": loss.item(),
                     "train_loss_total": train_loss_total,
                     "current_epoch_average_train_loss": train_loss_total / max(1, train_batches),
-                    "train_mean_batch_absolute_error": mean_batch_absolute_error,
-                    "train_mean_batch_spectral_angle": mean_spectral_angle,
+                    "train_batch_mean_absolute_error": mean_batch_absolute_error,
+                    "train_batch_mean_spectral_angle": mean_spectral_angle,
                 })
 
                 iter_end = time.perf_counter()
@@ -1088,7 +1092,7 @@ def main() -> int:
 
             avg_train_loss = train_loss_total / max(1, train_batches)
             avg_train_mae = train_mean_absolute_error_total / max(1, train_batches)
-            avg_train_sa = train_spectral_angle_total / max(1, train_batches)
+            avg_train_sa = train_mean_spectral_angle_total / max(1, train_batches)
 
             # Validation
             model.eval()
@@ -1131,13 +1135,15 @@ def main() -> int:
                     val_mean_absolute_error_total += mean_batch_absolute_error
                     val_spectral_angle_total += mean_spectral_angle
 
+                    val_step += 1
+
                     run.log({
-                        "val_batch": val_batches,
+                        "val_step": val_step,
                         "val_batch_loss": val_loss.item(),
                         "val_loss_total": val_loss_total,
                         "current_epoch_average_val_loss": val_loss_total / max(1, val_batches),
-                        "val_mean_batch_absolute_error": mean_batch_absolute_error,
-                        "val_mean_batch_spectral_angle": mean_spectral_angle,
+                        "val_batch_mean_absolute_error": mean_batch_absolute_error,
+                        "val_batch_mean_spectral_angle": mean_spectral_angle,
                     })
 
                     val_it.set_postfix(loss=f"{val_loss.item():.4f}")
@@ -1171,11 +1177,11 @@ def main() -> int:
             run.log({
                 "epoch": epoch,
                 "epoch_average_train_loss": avg_train_loss, 
-                "epoch_average_train_absolute_error": avg_train_mae,
-                "epoch_average_train_spectral_angle": avg_train_sa,
+                "epoch_average_train_mean_absolute_error": avg_train_mae,
+                "epoch_average_train_mean_spectral_angle": avg_train_sa,
                 "epoch_average_validation_loss": avg_val_loss,
-                "epoch_average_validation_absolute_error": avg_val_mae,
-                "epoch_average_validation_spectral_angle": avg_val_sa,
+                "epoch_average_validation_mean_absolute_error": avg_val_mae,
+                "epoch_average_validation_mean_spectral_angle": avg_val_sa,
             })
 
             if args.checkpoint_save:
@@ -1200,11 +1206,13 @@ def main() -> int:
                 )
                 break
     else:
+        train_step = 0
+        val_step = 0
         for epoch in range(1, args.epochs + 1):
             model.train()
             train_loss_total = 0.0
             train_mean_absolute_error_total = 0.0
-            train_spectral_angle_total = 0.0
+            train_mean_spectral_angle_total = 0.0
             train_batches = 0
             loop_end = time.perf_counter()
 
@@ -1329,15 +1337,17 @@ def main() -> int:
                 mean_spectral_angle = 1 - loss.item()
 
                 train_mean_absolute_error_total += mean_batch_absolute_error
-                train_spectral_angle_total += mean_spectral_angle
+                train_mean_spectral_angle_total += mean_spectral_angle
+
+                train_step += 1
 
                 run.log({
-                    "train_batch": train_batches,
+                    "train_step": train_step,
                     "train_batch_loss": loss.item(),
                     "train_loss_total": train_loss_total,
                     "current_epoch_average_train_loss": train_loss_total / max(1, train_batches),
-                    "train_mean_batch_absolute_error": mean_batch_absolute_error,
-                    "train_mean_batch_spectral_angle": mean_spectral_angle,
+                    "train_batch_mean_absolute_error": mean_batch_absolute_error,
+                    "train_batch_mean_spectral_angle": mean_spectral_angle,
                 })
                 
                 iter_end = time.perf_counter()
@@ -1361,7 +1371,7 @@ def main() -> int:
 
             avg_train_loss = train_loss_total / max(1, train_batches)
             avg_train_mae = train_mean_absolute_error_total / max(1, train_batches)
-            avg_train_sa = train_spectral_angle_total / max(1, train_batches)
+            avg_train_sa = train_mean_spectral_angle_total / max(1, train_batches)
 
             # Validation
             model.eval()
@@ -1394,13 +1404,15 @@ def main() -> int:
                     val_mean_absolute_error_total += mean_batch_absolute_error
                     val_spectral_angle_total += mean_spectral_angle
 
+                    val_step += 1
+
                     run.log({
-                        "val_batch": val_batches,
+                        "val_step": val_step,
                         "val_batch_loss": val_loss.item(),
                         "val_loss_total": val_loss_total,
                         "current_epoch_average_val_loss": val_loss_total / max(1, val_batches),
-                        "val_mean_batch_absolute_error": mean_batch_absolute_error,
-                        "val_mean_batch_spectral_angle": mean_spectral_angle,
+                        "val_batch_mean_absolute_error": mean_batch_absolute_error,
+                        "val_batch_mean_spectral_angle": mean_spectral_angle,
                     })
 
                     val_it.set_postfix(loss=f"{val_loss.item():.4f}")
@@ -1433,11 +1445,11 @@ def main() -> int:
             run.log({
                 "epoch": epoch,
                 "epoch_average_train_loss": avg_train_loss, 
-                "epoch_average_train_absolute_error": avg_train_mae,
-                "epoch_average_train_spectral_angle": avg_train_sa,
+                "epoch_average_train_mean_absolute_error": avg_train_mae,
+                "epoch_average_train_mean_spectral_angle": avg_train_sa,
                 "epoch_average_validation_loss": avg_val_loss,
-                "epoch_average_validation_absolute_error": avg_val_mae,
-                "epoch_average_validation_spectral_angle": avg_val_sa,
+                "epoch_average_validation_mean_absolute_error": avg_val_mae,
+                "epoch_average_validation_mean_spectral_angle": avg_val_sa,
             })
 
             if args.checkpoint_save:
