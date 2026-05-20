@@ -94,48 +94,78 @@ def masked_pearson_correlation_distance(
 
 
 def gaussian_nll(
-    y_true: torch.Tensor, y_mean_pred: torch.Tensor, y_var_pred: torch.Tensor, y_missingness_pred: torch.Tensor
+    y_true: torch.Tensor, y_log_mean_pred: torch.Tensor, y_log_var_pred: torch.Tensor, y_missingness_pred: torch.Tensor
 ) -> torch.Tensor:
+    """
+    Calcuates a combined loss of negative log likelihood, and binary cross entropy with logits.
+    The NLL loss uses the true vector together with the predicted mean, and variance.
+    For the BCE loss the true vector is turned into a categorical vector 
+    with 0:s for missing or defined missing (-1) intensities, and 1:s for all intensities > 0.
+    The modified true vector is the target for the missingness prediction within the
+    BCEWithLogitsLoss() function.
+
+    Parameters
+    ----------
+    y_true : torch.Tensor
+        A tensor containing the true values, with shape `(batch_size, num_values)`.
+    y_log_mean_pred : torch.Tensor
+        A tensor containing the predicted log mean values, with the same shape as `y_true`.
+    y_log_var_pred : torch.Tensor
+        A tensor containing the predicted log variance values, with the same shape as `y_true`.
+    y_missingness_pred : torch.Tensor
+        A tensor containing the predicted missingness probabilities, with the same shape as `y_true`.
+
+    Returns
+    -------
+    torch.Tensor
+        A tensor containing the sum of the NLL and BCE loss.
+
+    """
     
     # To avoid numerical instability during training on GPUs,
-    # we add a fuzzing constant epsilon of 1×10−7 to all vectors
+    # epsilon is utilized
     epsilon = 1e-7
 
-    # Getting indicies of 0 and -1
+    # Getting indicies of which y values are NOT 0 or -1
     present = y_true > 0
 
     # Masking
-    y_true[~present] = 0
-    missingness_target = torch.clone(y_true)
-    missingness_target[present] = 1 # To give a yes/no target for the loss function
-    #y_true.where(y_true == -1, torch.tensor(0))
-    #y_true[y_true==-1] = 0 # to allow log()
-    true_log_masked = torch.log(y_true + epsilon) # see if logic is sound
-    mean_masked = y_mean_pred + epsilon
-    var_masked = torch.pow(y_var_pred, 2) + epsilon
-    missingness_masked = y_missingness_pred + epsilon # Might need to contain between 0 to 1
+    # Cloning y_true to ensure that the in-place changes does not effect other
+    # parts of the y_true vector use
+    y_true_masked = y_true.clone()
+    # Will set -1 values to 0
+    y_true_masked[~present] = 0
+    missingness_target = torch.clone(y_true_masked)
 
-    # Check the size, and try to reduce
-    inner_function = (torch.add(torch.mul(torch.exp(-var_masked), torch.pow(torch.sub(true_log_masked, mean_masked), 2)), var_masked))
-    nll_loss = torch.mean(inner_function) * 1/2
+    # Sets all values >0 to 1, to give a yes/no target for the loss function
+    # This tensor now only contains 1:s and 0:s
+    missingness_target[present] = 1
 
-    #inner_function = torch.add(torch.div(torch.pow(torch.sub(true_log_masked, mean_masked), 2), var_masked), torch.log(var_masked))
-    #inner_function = inner_function + np.log(2*np.pi)
+    # Clamp y_true_masked to epsilon as to avoid logarithms of small numbers and 0
+    log_true_masked = torch.log(torch.clamp(y_true_masked, min = epsilon)) 
+    # The maximum intensity measurement (relative abundance) is presumed to be 1
+    log_mean_masked = torch.clamp(y_log_mean_pred, -1.0 + epsilon, 1.0 - epsilon)
+
+    # As e^-17 < 1e-7 (~4e-8) the log var maximum is 17 to be of a similar size as
+    # epsilon. 
+    log_var_masked = torch.clamp(y_log_var_pred, -17 + epsilon, 17 - epsilon)
+
+    # Contained between 0 to 1
+    missingness_masked = torch.clamp(y_missingness_pred, epsilon, 1 - epsilon)
+
+    # Calculate squared mean error
+    squared_mean_error = torch.pow(torch.sub(log_true_masked, log_mean_masked), 2)
+
+    # First part of the loss function
+    nll_loss = 0.5 * torch.mean(
+        (torch.exp(-log_var_masked) * squared_mean_error) + log_var_masked
+    )
     
-    # target, presumably y_true, need to be between 0 and 1 for calculating presence_loss(missingness, target)
-    # Since there are known outcomes target only contains 0:s and 1:s
+    # Second part of the loss function
+    # the prediction should be 1 for present peptides and 0 for missing
     presence_loss = torch.nn.BCEWithLogitsLoss(reduction="mean")
-    presence = -presence_loss(missingness_masked, missingness_target) # the prediction should be 1 for present peptides and 0 for missing
+    presence = presence_loss(missingness_masked, missingness_target) 
 
     total_loss = nll_loss + presence
 
     return total_loss
-
-'''
-y_zero_presence = torch.sub(1, missingness_masked)
-y_larger_presence = torch.mul(missingness_masked, torch.normal(mean_log_masked, torch.abs(var_log_masked)))
-# Try torch.where for the condition y==0, currently y_zero starts positive and y_larger can contain negative values
-# Presumably due to log mean being negative
-presence_pred = torch.abs(torch.where(y_true == 0, y_zero_presence, y_larger_presence)) # Should probably find better solution for negative presence predictions
-total_presence_loss = - torch.mean(torch.log(presence_pred))
-'''
