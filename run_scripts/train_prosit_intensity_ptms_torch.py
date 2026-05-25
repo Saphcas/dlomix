@@ -1044,7 +1044,12 @@ def main() -> int:
                 train_it.set_postfix(loss=f"{loss.item():.4f}")
 
                 # Use the mean as an approximation of y_pred for mean absolute error and spectral angle approximation
-                mean_batch_absolute_error = torch.mean(torch.abs(torch.sub(pred_mean, batch[columns.label]))).item()
+                # Create a y_true that is the batch[columns.label] with -1 values turned into 0
+                y_true = batch[columns.label].detach()
+                present = y_true > 0
+                y_true[~present] = 0
+                mean_batch_absolute_error = torch.mean(torch.abs(torch.sub(torch.exp(pred_mean), y_true))).item()
+
                 # Mean spectral angle calculation
                 epsilon = 1e-7
                 msa_pred = pred_mean.detach()                   # To prevent unneccesary memory usage detach the gradient mapping
@@ -1119,7 +1124,12 @@ def main() -> int:
                     val_batches += 1
                     
                     # Use the mean as an approximation of y_pred for mean absolute error and spectral angle approximation
-                    mean_batch_absolute_error = torch.mean(torch.abs(torch.sub(pred_mean, batch[columns.label]))).item()
+                    # Create a y_true that is the batch[columns.label] with -1 values turned into 0
+                    y_true = batch[columns.label].detach()
+                    present = y_true > 0
+                    y_true[~present] = 0
+                    mean_batch_absolute_error = torch.mean(torch.abs(torch.sub(torch.exp(pred_mean), y_true))).item()
+
                     # Mean spectral angle calculation (just 1 - loss value for standard prosit)
                     epsilon = 1e-7
                     msa_pred = pred_mean.detach()                   # To prevent unneccesary memory usage detach the gradient mapping
@@ -1334,7 +1344,11 @@ def main() -> int:
                 train_it.set_postfix(loss=f"{loss.item():.4f}")
                 
                 # pred is the predicted mean when using the spectral angle based loss function
-                mean_batch_absolute_error = torch.mean(torch.abs(torch.sub(pred, batch[columns.label]))).item()
+                # Create a y_true that is the batch[columns.label] with -1 values turned into 0
+                y_true = batch[columns.label].detach()
+                present = y_true > 0
+                y_true[~present] = 0
+                mean_batch_absolute_error = torch.mean(torch.abs(torch.sub(pred, y_true))).item()
                 # Mean adjusted spectral angle calculation (just 1 - loss value for standard prosit)
                 mean_spectral_angle = 1 - loss.item()
 
@@ -1399,7 +1413,10 @@ def main() -> int:
                     val_batches += 1
 
                     # pred is the predicted mean when using the spectral angle based loss function
-                    mean_batch_absolute_error = torch.mean(torch.abs(torch.sub(pred, batch[columns.label]))).item()
+                    y_true = batch[columns.label].detach()
+                    present = y_true > 0
+                    y_true[~present] = 0
+                    mean_batch_absolute_error = torch.mean(torch.abs(torch.sub(pred, y_true))).item()
                     # Mean adjusted spectral angle calculation (just 1 - loss value for standard prosit)
                     mean_spectral_angle = 1 - val_loss.item()
 

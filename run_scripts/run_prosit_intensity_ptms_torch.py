@@ -13,6 +13,8 @@ from dlomix.data import FragmentIonIntensityDataset
 from dlomix.losses.intensity_torch import masked_spectral_distance, gaussian_nll
 from dlomix.models import PrositIntensityPredictor, PrositIntensityUncertaintyPredictor
 
+from sklearn.metrics import accuracy_score
+
 logging.basicConfig(
     level=logging.INFO,
     # level=logging.DEBUG,
@@ -78,6 +80,9 @@ if UNCERTAINTY_AWARE:
 
     for epoch in tqdm(range(0, N_EPOCHS)):
         epoch_loss = 0
+        mae = 0
+        mv = 0
+        accuracy = 0
         model.train()
         data_size = len(d.tensor_train_data)
         for batch in d.tensor_train_data:
@@ -96,7 +101,28 @@ if UNCERTAINTY_AWARE:
                 model.parameters(), max_norm=1, norm_type=2, error_if_nonfinite=False
             )
             optimizer.step()
-        print(f"Epoch {epoch} Summary: Training Loss: {epoch_loss / data_size:.4f}")
+            y_true = batch["intensities_raw"].detach()
+            present = y_true > 0
+            y_true[~present] = 0
+            mae += torch.mean(torch.abs(torch.sub(output_mean, y_true))).item()
+            mv += torch.mean(output_var).item()
+
+            missing_tensor = torch.clone(output_missingness).detach()
+            missing = missing_tensor > 0.5
+            missing_tensor[missing] = 1
+            missing_tensor[~missing] = 0
+            missing_target = torch.clone(y_true).detach()
+            missing_target[present] = 0
+            missing_target[~present] = 1
+
+            missing_tensor = torch.flatten(missing_tensor).detach()
+            missing_target = torch.flatten(missing_target).detach()
+            accuracy += accuracy_score(missing_target, missing_tensor, normalize=True)
+
+        print(
+            f"Epoch {epoch} Summary: Training Loss: {epoch_loss / data_size:.4f}\nMean absolute error: {mae / data_size:.4f},"
+            f"\nMean variance: {mv / data_size:.4f},\nMissingness mean accuracy {accuracy / data_size:.4f}"
+            )
 
         # Validation phase.
         model.eval()
@@ -133,6 +159,7 @@ else:
 
     for epoch in tqdm(range(0, N_EPOCHS)):
         epoch_loss = 0
+        mae = 0
         model.train()
         data_size = len(d.tensor_train_data)
         for batch in d.tensor_train_data:
@@ -154,7 +181,12 @@ else:
                 model.parameters(), max_norm=1, norm_type=2, error_if_nonfinite=False
             )
             optimizer.step()
-        print(f"Epoch {epoch} Summary: Training Loss: {epoch_loss / data_size:.4f}")
+
+            y_true = batch["intensities_raw"].detach()
+            present = y_true > 0
+            y_true[~present] = 0
+            mae += torch.mean(torch.abs(torch.sub(output, y_true))).item()
+        print(f"Epoch {epoch} Summary: Training Loss: {epoch_loss / data_size:.4f}\nMean absolute error: {mae / data_size:.4f}")
 
         # Validation phase.
         model.eval()
