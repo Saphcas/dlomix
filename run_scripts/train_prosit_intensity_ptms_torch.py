@@ -1048,12 +1048,12 @@ def main() -> int:
                 y_true = batch[columns.label].detach()
                 present = y_true > 0
                 y_true[~present] = 0
-                mean_batch_absolute_error = torch.mean(torch.abs(torch.sub(torch.exp(pred_mean), y_true))).item()
+                mean_batch_absolute_error = torch.mean(torch.abs(torch.sub(pred_mean, y_true))).item()
 
                 # Mean spectral angle calculation
                 epsilon = 1e-7
                 msa_pred = pred_mean.detach()                   # To prevent unneccesary memory usage detach the gradient mapping
-                msa_true = batch[columns.label].detach()        # To prevent unneccesary memory usage detach the gradient mapping
+                msa_true = y_true.detach()        # To prevent unneccesary memory usage detach the gradient mapping
                 pred_masked = ((msa_true + 1) * msa_pred) / (msa_true + 1 + epsilon)
                 true_masked = ((msa_true + 1) * msa_true) / (msa_true + 1 + epsilon)
                 true_norm = torch.nn.functional.normalize(true_masked, p=2, dim=-1)
@@ -1128,12 +1128,12 @@ def main() -> int:
                     y_true = batch[columns.label].detach()
                     present = y_true > 0
                     y_true[~present] = 0
-                    mean_batch_absolute_error = torch.mean(torch.abs(torch.sub(torch.exp(pred_mean), y_true))).item()
+                    mean_batch_absolute_error = torch.mean(torch.abs(torch.sub(pred_mean, y_true))).item()
 
                     # Mean spectral angle calculation (just 1 - loss value for standard prosit)
                     epsilon = 1e-7
                     msa_pred = pred_mean.detach()                   # To prevent unneccesary memory usage detach the gradient mapping
-                    msa_true = batch[columns.label].detach()        # To prevent unneccesary memory usage detach the gradient mapping
+                    msa_true = y_true.detach()        # To prevent unneccesary memory usage detach the gradient mapping
                     pred_masked = ((msa_true + 1) * msa_pred) / (msa_true + 1 + epsilon)
                     true_masked = ((msa_true + 1) * msa_true) / (msa_true + 1 + epsilon)
                     true_norm = torch.nn.functional.normalize(true_masked, p=2, dim=-1)
