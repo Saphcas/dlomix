@@ -154,9 +154,10 @@ def gaussian_nll(
     nll = torch.nn.GaussianNLLLoss(eps=epsilon, reduction='mean')
     nll_loss = nll(input=mean_clamped, target=true_clamped, var=var_clamped)
 
+    #TODO: casting (?) requires BCEWithLogitsLoss, therefore change code back to using logits (done),
+    # and add a conversion for the output instead. See WandB logs.
     # Second part of the loss function
-    # BCELoss presumes the input prediction to be a probability
-    presence_loss = torch.nn.BCELoss(reduction="mean")
+    presence_loss = torch.nn.BCEWithLogitsLoss(reduction="mean")
     presence = presence_loss(y_missingness_pred, missingness_target) 
 
     total_loss = nll_loss + presence

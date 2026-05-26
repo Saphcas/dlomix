@@ -108,6 +108,7 @@ if UNCERTAINTY_AWARE:
             mv += torch.mean(output_var).item()
 
             missing_tensor = torch.clone(output_missingness).detach()
+            missing_tensor = torch.sigmoid(missing_tensor) # Turns logits into probabilities
             missing = missing_tensor > 0.5
             missing_tensor[missing] = 1
             missing_tensor[~missing] = 0

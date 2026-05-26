@@ -457,9 +457,8 @@ class PrositIntensityUncertaintyPredictor(nn.Module):
             OrderedDict(
                 [
                     ("time_dense", nn.LazyLinear(out_features=len_fion)),
-                    ("activation", nn.LeakyReLU()),
+                    ("activation", nn.LeakyReLU()), # Possibly remove depending on if the sigmoid in BCEWithLogits is enough activation
                     ("output", nn.Flatten()),
-                    ("probability", nn.Sigmoid()), # Added to convert the tensor into a probability tensor, needed for BCELoss
                 ]
             )
         )
