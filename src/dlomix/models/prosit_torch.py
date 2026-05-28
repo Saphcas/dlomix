@@ -435,8 +435,7 @@ class PrositIntensityUncertaintyPredictor(nn.Module):
             OrderedDict(
                 [
                     ("time_dense", nn.LazyLinear(out_features=len_fion)),
-                    ("activation", nn.Softplus()), # Mean estimation needs to be positive
-                    #("activation", nn.LeakyReLU()), - Is used in the standard prosit regressor
+                    ("activation", nn.LeakyReLU()),
                     ("output", nn.Flatten()),
                 ]
             )
@@ -447,7 +446,6 @@ class PrositIntensityUncertaintyPredictor(nn.Module):
                 [
                     ("time_dense", nn.LazyLinear(out_features=len_fion)),
                     ("activation", nn.Softplus()), # Variance estimation needs to be positive
-                    #("activation", nn.LeakyReLU()), - Is used in the standard prosit regressor
                     ("output", nn.Flatten()),
                 ]
             )
@@ -457,7 +455,7 @@ class PrositIntensityUncertaintyPredictor(nn.Module):
             OrderedDict(
                 [
                     ("time_dense", nn.LazyLinear(out_features=len_fion)),
-                    ("activation", nn.LeakyReLU()), # Possibly remove depending on if the sigmoid in BCEWithLogits is enough activation
+                    ("activation", nn.LeakyReLU()), 
                     ("output", nn.Flatten()),
                 ]
             )

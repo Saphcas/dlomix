@@ -113,7 +113,7 @@ def gaussian_nll(
     y_var_pred : torch.Tensor
         A tensor containing the predicted variance values, with the same shape as `y_true`.
     y_missingness_pred : torch.Tensor
-        A tensor containing the predicted missingness probabilities, with the same shape as `y_true`.
+        A tensor containing the predicted missingness logits, with the same shape as `y_true`.
 
     Returns
     -------
@@ -143,16 +143,14 @@ def gaussian_nll(
     missingness_target[present] = 0
     missingness_target[~present] = 1
 
-    # Clamp inputs for GaussianNLL to epsilon as to avoid logarithms of small numbers and 0
-    true_clamped = torch.clamp(y_true_masked, min = epsilon)
-    mean_clamped = torch.clamp(y_mean_pred, min = epsilon)
+    # Clamp variance before GaussianNLL to epsilon as to avoid explosion
     var_clamped = torch.clamp(y_var_pred, min = epsilon)
 
     # First part of the loss function
     # The tensors will be trained to be means and variances,
     # even if the function is preformed in log space.
     nll = torch.nn.GaussianNLLLoss(eps=epsilon, reduction='mean')
-    nll_loss = nll(input=mean_clamped, target=true_clamped, var=var_clamped)
+    nll_loss = nll(input=y_mean_pred, target=y_true_masked, var=var_clamped)
 
     #TODO: casting (?) requires BCEWithLogitsLoss, therefore change code back to using logits (done),
     # and add a conversion for the output instead. See WandB logs.
