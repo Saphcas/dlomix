@@ -94,7 +94,8 @@ def masked_pearson_correlation_distance(
 
 
 def gaussian_nll(
-    y_true: torch.Tensor, y_mean_pred: torch.Tensor, y_var_pred: torch.Tensor, y_missingness_pred: torch.Tensor
+    y_true: torch.Tensor, y_mean_pred: torch.Tensor, y_var_pred: torch.Tensor, y_missingness_pred: torch.Tensor,
+    encoded_sequence: torch.Tensor,
 ) -> torch.Tensor:
     """
     Calcuates a combined loss of negative log likelihood, and binary cross entropy with logits.
@@ -114,6 +115,9 @@ def gaussian_nll(
         A tensor containing the predicted variance values, with the same shape as `y_true`.
     y_missingness_pred : torch.Tensor
         A tensor containing the predicted missingness logits, with the same shape as `y_true`.
+    encoded_sequence : torch.Tensor
+        Tensor containing the number encoded sequence. N-terminal encoded as 21, and C-terminal
+        encoded as 22. Shape is equal to `(batch_size, max_seq_len)`.
 
     Returns
     -------
@@ -121,36 +125,69 @@ def gaussian_nll(
         A tensor containing the sum of the GaussianNLL and BCE loss.
 
     """
-    
-    # To avoid numerical instability during training on GPUs,
-    # epsilon is utilized
+    # To avoid numerical instability concerning variance calculation in particular
     epsilon = 1e-7
 
-    # Getting indicies of which y values are NOT 0 or -1
-    present = y_true > 0
+    # Use encoded sequence to determine sequence length and which tensor values are impossible.
+    # Encoded sequence contains the N- and C- terminal as well, they are not included in the intensity predictions.
+    # ----- WARNING -----
+    # If the encoding numbers for the terminals change the following code will need modification,
+    # currently (as seen in PTMS_ALPHABET in constants.py) the N-terminal is encoded as 21, and C-terminal as 22.
 
-    # Masking
-    # Cloning y_true to ensure that the in-place changes does not effect other
-    # parts of the y_true vector use
-    y_true_masked = y_true.clone()
-    # Will set -1 values to 0
-    y_true_masked[~present] = 0
-    missingness_target = torch.clone(y_true_masked)
+    # Collect the length of valid sequences in batch    
+    ind = []
+    for tensor in range(0, len(y_true)):
+        current_sequence = encoded_sequence[tensor].detach()
+        # Remove terminals and padding from sequence
+        if 21 in current_sequence or 22 in current_sequence:
+            # Remove N- and C-terminals from sequence length
+            n_terminal = current_sequence == 21
+            current_sequence = current_sequence[~n_terminal]
+            c_terminal = current_sequence == 22
+            current_sequence = current_sequence[~c_terminal]
+        
+        padding = current_sequence == 0
+        current_sequence = current_sequence[~padding]
+        #print(len(current_sequence))
+
+        # Calculate length of prediction tensors that are relevant based on sequence length
+        # for 3 charges, 2 ion types, and the maximum ion length
+        ind.append((3*2*(len(current_sequence) - 1)) - 1)
+
+    # Create a mask to sort which values to send to GaussianNLLLoss()
+    ind = torch.tensor(ind)
+    mask = torch.zeros_like(y_true)
+    mask[(torch.arange(y_true.shape[0]), ind)] = 1
+    mask = 1 - mask.cumsum(dim=1)
+    valid = mask.bool()
+
+    valid_y_true = y_true[valid]
+    valid_y_mean_pred = y_mean_pred[valid]
+    valid_y_var_pred = y_var_pred[valid]
+
+    # Missing ions within the sequence will be treated as missing signals (0)
+    existing = valid_y_true > 0
+    valid_y_true[~existing] = 0
 
     # To predict missingness; all elements with y_true > 0 will be 0, and 
     # others will be 1 as they are missing.
     # This tensor will only contains 1:s and 0:s afterward
+
+    # Getting bool of which y values are NOT 0 or -1
+    present = y_true > 0
+
+    missingness_target = y_true.clone()
     missingness_target[present] = 0
     missingness_target[~present] = 1
 
     # Clamp variance before GaussianNLL to epsilon as to avoid explosion
-    var_clamped = torch.clamp(y_var_pred, min = epsilon)
-
+    var_pred_masked = valid_y_var_pred + epsilon
+    
     # First part of the loss function
     # The tensors will be trained to be means and variances,
     # even if the function is preformed in log space.
     nll = torch.nn.GaussianNLLLoss(eps=epsilon, reduction='mean')
-    nll_loss = nll(input=y_mean_pred, target=y_true_masked, var=var_clamped)
+    nll_loss = nll(input=valid_y_mean_pred, target=valid_y_true, var=var_pred_masked)
 
     #TODO: casting (?) requires BCEWithLogitsLoss, therefore change code back to using logits (done),
     # and add a conversion for the output instead. See WandB logs.

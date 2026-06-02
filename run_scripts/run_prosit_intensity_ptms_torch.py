@@ -89,7 +89,7 @@ if UNCERTAINTY_AWARE:
             optimizer.zero_grad()
 
             output_mean, output_var, output_missingness = model(batch)
-            loss = loss_criterion(batch["intensities_raw"], output_mean, output_var, output_missingness)
+            loss = loss_criterion(batch["intensities_raw"], output_mean, output_var, output_missingness, batch["modified_sequence"])
         
             # print(loss.item())
             epoch_loss += loss.item()
@@ -133,7 +133,7 @@ if UNCERTAINTY_AWARE:
             for batch in d.tensor_val_data:
 
                 val_pred_cs = model(batch)
-                val_loss = loss_criterion(batch["intensities_raw"], val_pred_cs[0], val_pred_cs[1], val_pred_cs[2]) # Mean, var, missingness
+                val_loss = loss_criterion(batch["intensities_raw"], val_pred_cs[0], val_pred_cs[1], val_pred_cs[2], batch["modified_sequence"]) # Mean, var, missingness
                 val_loss_total += val_loss.item()
 
             avg_val_loss = val_loss_total / val_data_size
@@ -201,7 +201,7 @@ else:
                 val_loss_total += val_loss.item()
 
             avg_val_loss = val_loss_total / val_data_size
-        print(f"Epoch {epoch} Summary:  Validation Loss: {avg_val_loss:.4f}")
+        print(f"Validation Loss: {avg_val_loss:.4f}")
 
     print(val_pred_cs.shape)
     print(val_pred_cs[0])

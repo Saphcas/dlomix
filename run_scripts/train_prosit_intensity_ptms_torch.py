@@ -1003,7 +1003,7 @@ def main() -> int:
                     if do_profile:
                         _maybe_cuda_sync(device, profile_cuda_sync)
                         t_loss_0 = time.perf_counter()
-                    loss = gaussian_nll(batch[columns.label], pred_mean, pred_var, pred_missing_logit)
+                    loss = gaussian_nll(batch[columns.label], pred_mean, pred_var, pred_missing_logit, batch[columns.sequence])
                     if do_profile:
                         _maybe_cuda_sync(device, profile_cuda_sync)
                         loss_s = time.perf_counter() - t_loss_0
@@ -1121,7 +1121,7 @@ def main() -> int:
                     batch = _cast_batch_types(batch, columns)
                     with _amp_autocast_context(device, amp_enabled, amp_dtype):
                         pred_mean, pred_var, pred_missing_logit = model(batch)
-                        val_loss = gaussian_nll(batch[columns.label], pred_mean, pred_var, pred_missing_logit)
+                        val_loss = gaussian_nll(batch[columns.label], pred_mean, pred_var, pred_missing_logit, batch[columns.sequence])
                     val_loss_total += val_loss.item()
                     val_batches += 1
                     
@@ -1524,7 +1524,7 @@ def main() -> int:
                     batch = _cast_batch_types(batch, columns)
                     with _amp_autocast_context(device, amp_enabled, amp_dtype):
                         pred_mean, pred_var, pred_missing_logit = model(batch)
-                        test_loss = gaussian_nll(batch[columns.label], pred_mean, pred_var, pred_missing_logit)
+                        test_loss = gaussian_nll(batch[columns.label], pred_mean, pred_var, pred_missing_logit, batch[columns.sequence])
                     test_loss_total += test_loss.item()
                     test_batches += 1
                     test_it.set_postfix(loss=f"{test_loss.item():.4f}")
