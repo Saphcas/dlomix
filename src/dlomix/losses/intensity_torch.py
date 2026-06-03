@@ -135,35 +135,31 @@ def gaussian_nll(
     # currently (as seen in PTMS_ALPHABET in constants.py) the N-terminal is encoded as 21, and C-terminal as 22.
 
     # Collect the length of valid sequences in batch    
-    ind = []
-    for tensor in range(0, len(y_true)):
-        current_sequence = encoded_sequence[tensor].detach()
-        # Remove terminals and padding from sequence
-        if 21 in current_sequence or 22 in current_sequence:
-            # Remove N- and C-terminals from sequence length
-            n_terminal = current_sequence == 21
-            current_sequence = current_sequence[~n_terminal]
-            c_terminal = current_sequence == 22
-            current_sequence = current_sequence[~c_terminal]
-        
-        padding = current_sequence == 0
-        current_sequence = current_sequence[~padding]
-        #print(len(current_sequence))
-
-        # Calculate length of prediction tensors that are relevant based on sequence length
-        # for 3 charges, 2 ion types, and the maximum ion length
-        ind.append((3*2*(len(current_sequence) - 1)) - 1)
+    
+    # Removes padding, and terminals from the sequences
+    encoded_sequence = [tensor[tensor!=0.] for tensor in encoded_sequence]
+    encoded_sequence = [tensor[tensor!=21.] for tensor in encoded_sequence]
+    encoded_sequence = [tensor[tensor!=22.] for tensor in encoded_sequence]
+    # Index in instensity vector calculation
+    ind = torch.tensor([(3*2*(len(tensor)-1)-1) for tensor in encoded_sequence])
 
     # Create a mask to sort which values to send to GaussianNLLLoss()
-    ind = torch.tensor(ind)
     mask = torch.zeros_like(y_true)
     mask[(torch.arange(y_true.shape[0]), ind)] = 1
     mask = 1 - mask.cumsum(dim=1)
     valid = mask.bool()
 
-    valid_y_true = y_true[valid]
-    valid_y_mean_pred = y_mean_pred[valid]
-    valid_y_var_pred = y_var_pred[valid]
+    # Sanity check to hopefully not raise an assert error
+    if valid.shape == y_true.shape:
+        valid_y_true = y_true[valid]
+        valid_y_mean_pred = y_mean_pred[valid]
+        valid_y_var_pred = y_var_pred[valid]
+    else: 
+        print(f"Shape mismatch. valid shape: {valid.shape()}, y shape: {y_true.shape()}")
+        print("Using entire vector")
+        valid_y_true = y_true
+        valid_y_mean_pred = y_mean_pred
+        valid_y_var_pred = y_var_pred
 
     # Missing ions within the sequence will be treated as missing signals (0)
     existing = valid_y_true > 0
