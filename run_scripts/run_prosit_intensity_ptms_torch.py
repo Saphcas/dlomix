@@ -88,8 +88,8 @@ if UNCERTAINTY_AWARE:
         for batch in d.tensor_train_data:
             optimizer.zero_grad()
 
-            output_mean, output_var, output_missingness = model(batch)
-            loss = loss_criterion(batch["intensities_raw"], output_mean, output_var, output_missingness, batch["modified_sequence"])
+            output_mean, output_log_var, output_missingness = model(batch)
+            loss = loss_criterion(batch["intensities_raw"], output_mean, output_log_var, output_missingness, batch["modified_sequence"])
         
             # print(loss.item())
             epoch_loss += loss.item()
@@ -101,28 +101,24 @@ if UNCERTAINTY_AWARE:
                 model.parameters(), max_norm=1, norm_type=2, error_if_nonfinite=False
             )
             optimizer.step()
-            y_true = batch["intensities_raw"].detach()
+            y_true = batch["intensities_raw"].detach().clone()
             present = y_true > 0
             y_true[~present] = 0
             mae += torch.mean(torch.abs(torch.sub(output_mean, y_true))).item()
-            mv += torch.mean(output_var).item()
+            mv += torch.mean(output_log_var).item()
 
-            missing_tensor = torch.clone(output_missingness).detach()
-            missing_tensor = torch.sigmoid(missing_tensor) # Turns logits into probabilities
-            missing = missing_tensor > 0.5
-            missing_tensor[missing] = 1
-            missing_tensor[~missing] = 0
-            missing_target = torch.clone(y_true).detach()
-            missing_target[present] = 0
-            missing_target[~present] = 1
+            valid = batch["intensities_raw"].detach() >= 0
+            presence_tensor = torch.sigmoid(output_missingness.detach())
+            presence_prediction = presence_tensor > 0.5
+            presence_target = present
 
-            missing_tensor = torch.flatten(missing_tensor).detach()
-            missing_target = torch.flatten(missing_target).detach()
-            accuracy += accuracy_score(missing_target, missing_tensor, normalize=True)
+            presence_prediction = torch.flatten(presence_prediction[valid]).cpu().numpy()
+            presence_target = torch.flatten(presence_target[valid]).cpu().numpy()
+            accuracy += accuracy_score(presence_target, presence_prediction, normalize=True)
 
         print(
             f"Epoch {epoch} Summary: Training Loss: {epoch_loss / data_size:.4f}\nMean absolute error: {mae / data_size:.4f},"
-            f"\nMean variance: {mv / data_size:.4f},\nMissingness mean accuracy {accuracy / data_size:.4f}"
+            f"\nMean log variance: {mv / data_size:.4f},\nPresence mean accuracy {accuracy / data_size:.4f}"
             )
 
         # Validation phase.
@@ -183,7 +179,7 @@ else:
             )
             optimizer.step()
 
-            y_true = batch["intensities_raw"].detach()
+            y_true = batch["intensities_raw"].detach().clone()
             present = y_true > 0
             y_true[~present] = 0
             mae += torch.mean(torch.abs(torch.sub(output, y_true))).item()

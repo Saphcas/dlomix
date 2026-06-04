@@ -430,37 +430,30 @@ class PrositIntensityUncertaintyPredictor(nn.Module):
         if self.meta_data_keys:
             self.meta_data_fusion_layer = MetaDataFusionBlock(max_ion=self.max_ion)
 
-        
-        self.mean_regressor = nn.Sequential(
+        self.mean_regressor = self._make_parameter_head()
+        self.log_var_regressor = self._make_parameter_head()
+        self.missingness_regressor = self._make_parameter_head()
+
+    def _make_parameter_head(self):
+        return nn.Sequential(
             OrderedDict(
                 [
-                    ("time_dense", nn.LazyLinear(out_features=len_fion)),
+                    (
+                        "hidden_dense",
+                        nn.LazyLinear(out_features=self.regressor_layer_size),
+                    ),
                     ("activation", nn.LeakyReLU()),
+                    ("regressor_dropout", nn.Dropout(self.latent_dropout_rate)),
+                    # Final projection is intentionally linear. The three heads
+                    # output Gaussian means, log variances, and Bernoulli logits.
+                    (
+                        "output_dense",
+                        nn.Linear(self.regressor_layer_size, self.len_fion),
+                    ),
                     ("output", nn.Flatten()),
                 ]
             )
         )
-
-        self.var_regressor = nn.Sequential(
-            OrderedDict(
-                [
-                    ("time_dense", nn.LazyLinear(out_features=len_fion)),
-                    ("activation", nn.Softplus()), # Variance estimation needs to be positive
-                    ("output", nn.Flatten()),
-                ]
-            )
-        )
-
-        self.missingness_regressor = nn.Sequential(
-            OrderedDict(
-                [
-                    ("time_dense", nn.LazyLinear(out_features=len_fion)),
-                    ("activation", nn.LeakyReLU()), 
-                    ("output", nn.Flatten()),
-                ]
-            )
-        )
-        
 
     def _build_encoders(self):
         # sequence encoder -> always present
@@ -577,11 +570,10 @@ class PrositIntensityUncertaintyPredictor(nn.Module):
 
         x = self.decoder(x)
 
-        
         x_mean = self.mean_regressor(x)
-        x_var = self.var_regressor(x)
+        x_log_var = self.log_var_regressor(x)
         x_missingness = self.missingness_regressor(x)
-        x = x_mean, x_var, x_missingness
+        x = x_mean, x_log_var, x_missingness
 
         return x
 
