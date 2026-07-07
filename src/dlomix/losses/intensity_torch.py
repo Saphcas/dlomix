@@ -93,71 +93,247 @@ def masked_pearson_correlation_distance(
     return 1 - (r_num / r_den)
 
 
+def _infer_fragments_per_cleavage(
+    y_true: torch.Tensor, encoded_sequence: torch.Tensor, has_termini: bool
+) -> int:
+    """Infer how many ion channels are stored per peptide cleavage.
+
+    Prosit-style intensity vectors flatten all predicted fragment-ion channels
+    into one axis. For a peptide with L amino-acid residues, there are L - 1
+    internal cleavages. With max_seq_len=32 and terminal tokens enabled, the
+    largest peptide has 30 residues, therefore 29 cleavages. A 174-wide target
+    tensor is then interpreted as 29 cleavages * 6 b/y charge channels.
+    """
+    # Encoded batches may include synthetic N- and C-terminal tokens. They are
+    # sequence context tokens, not amino-acid residues that can create b/y cuts.
+    terminal_count = 2 if has_termini else 0
+
+    # encoded_sequence.shape[-1] is the padded sequence width, e.g. max_seq_len.
+    # Subtract terminal tokens to get the maximum residue count represented by
+    # this tensor shape. The max(..., 1) avoids zero in malformed tiny examples.
+    max_residue_count = max(int(encoded_sequence.shape[-1]) - terminal_count, 1)
+
+    # A peptide with L residues has L - 1 internal backbone cleavages. Each
+    # cleavage can produce several ion channels, such as b/y ions for charges
+    # 1, 2, and 3. Again clamp to at least one to keep diagnostics well-defined.
+    max_cleavages = max(max_residue_count - 1, 1)
+
+    # If the flattened target width divides cleanly by the number of cleavages,
+    # the quotient is the number of ion channels stored for each cleavage.
+    if y_true.shape[-1] % max_cleavages == 0:
+        return int(y_true.shape[-1] // max_cleavages)
+
+    # Prosit intensity models normally predict six channels per cleavage:
+    # b1, b2, b3, y1, y2, y3. Keep this as a conservative fallback for callers
+    # that provide tensors with a non-standard padded shape.
+    return 6
+
+
+def _possible_fragment_mask(
+    y_true: torch.Tensor,
+    encoded_sequence: torch.Tensor,
+    fragments_per_cleavage=None,
+    has_termini: bool = True,
+) -> torch.Tensor:
+    """Return a boolean mask for fragment-ion positions possible for each peptide.
+
+    Parameters
+    ----------
+    y_true : torch.Tensor
+        Intensity target tensor with shape `(batch_size, flattened_ion_count)`.
+        The final axis is ordered by peptide cleavage and ion channel. For a
+        peptide shorter than the configured maximum length, trailing positions in
+        this axis correspond to cleavages that cannot exist.
+    encoded_sequence : torch.Tensor
+        Padded integer-encoded peptide sequences with shape
+        `(batch_size, max_seq_len)`. Non-zero entries are real sequence/context
+        tokens. Zero entries are padding.
+    fragments_per_cleavage : int, optional
+        Number of flattened target positions used for one peptide cleavage. In
+        standard Prosit intensity this is 6: b/y ions for charges 1, 2, and 3.
+        If omitted, infer it from the target width and padded sequence width.
+    has_termini : bool, optional
+        Whether `encoded_sequence` includes N- and C-terminal tokens. When true,
+        those two tokens are excluded from residue-length and cleavage counts.
+
+    Returns
+    -------
+    torch.Tensor
+        Boolean tensor with the same shape as `y_true`; true means the position
+        belongs to a theoretical b/y fragment for that peptide length.
+    """
+    if y_true.ndim != 2:
+        raise ValueError(
+            f"Expected y_true with shape (batch, ions), got {tuple(y_true.shape)}"
+        )
+    if encoded_sequence.ndim != 2:
+        raise ValueError(
+            "Expected encoded_sequence with shape (batch, sequence), got "
+            f"{tuple(encoded_sequence.shape)}"
+        )
+    if y_true.shape[0] != encoded_sequence.shape[0]:
+        raise ValueError(
+            "Batch size mismatch between y_true and encoded_sequence: "
+            f"{y_true.shape[0]} != {encoded_sequence.shape[0]}"
+        )
+
+    # Keep all generated masks and index tensors on the target device. The
+    # earlier CPU-created index tensor is a common cause of CUDA
+    # advanced-indexing failures once the batch lives on GPU.
+    encoded_sequence = encoded_sequence.to(device=y_true.device)
+
+    # Determine how many flattened ion positions correspond to one cleavage.
+    if fragments_per_cleavage is None:
+        fragments_per_cleavage = _infer_fragments_per_cleavage(
+            y_true, encoded_sequence, has_termini
+        )
+
+    # Count non-padding tokens per peptide. If terminal tokens are present,
+    # subtract them because they do not represent residues or cleavage sites.
+    terminal_count = 2 if has_termini else 0
+    residue_counts = (encoded_sequence != 0).sum(dim=1) - terminal_count
+    residue_counts = residue_counts.clamp(min=0)
+
+    # Convert residue counts to flattened ion counts. A peptide with L residues
+    # has L - 1 cleavages; each cleavage contributes fragments_per_cleavage
+    # contiguous positions in the flattened intensity vector.
+    valid_counts = (residue_counts - 1).clamp(min=0) * int(fragments_per_cleavage)
+    valid_counts = valid_counts.clamp(max=y_true.shape[-1])
+
+    # Compare every flattened ion position against each peptide's valid count.
+    # Broadcasting gives shape (batch_size, flattened_ion_count).
+    fragment_positions = torch.arange(y_true.shape[-1], device=y_true.device)
+    return fragment_positions.unsqueeze(0) < valid_counts.unsqueeze(1)
+
+
 def gaussian_nll(
-    y_true: torch.Tensor, y_mean_pred: torch.Tensor, y_var_pred: torch.Tensor, y_missingness_pred: torch.Tensor
+    y_true: torch.Tensor,
+    y_mean_pred: torch.Tensor,
+    y_log_var_pred: torch.Tensor,
+    y_missingness_pred: torch.Tensor,
+    encoded_sequence: torch.Tensor,
+    fragments_per_cleavage=None,
+    has_termini: bool = True,
 ) -> torch.Tensor:
     """
-    Calcuates a combined loss of negative log likelihood, and binary cross entropy with logits.
-    The NLL loss uses the true vector together with the predicted mean, and variance.
-    For the BCE loss the true vector is turned into a categorical vector 
-    with 0:s for missing or defined missing (-1) intensities, and 1:s for all intensities > 0.
-    The modified true vector is the target for the missingness prediction within the
-    BCEWithLogitsLoss() function.
+    Calculates a zero-inflated log-normal loss.
+
+    This implements the decomposed mixture objective:
+
+        L_mix = BCE(t_k, logit_k) + sum_{k: y_k > 0} GaussianNLL_k
+
+    where the BCE term is evaluated for valid theoretical ions, `t_k = 1` means
+    the fragment is present (`y_k > 0`), and the Gaussian term is evaluated only
+    for present fragments in log-intensity space.
+
+    Intensities with the sentinel value -1 are impossible ions and are ignored.
+    Valid zero-intensity ions still contribute to the BCE absence term.
 
     Parameters
     ----------
     y_true : torch.Tensor
         A tensor containing the true values, with shape `(batch_size, num_values)`.
     y_mean_pred : torch.Tensor
-        A tensor containing the predicted mean values, with the same shape as `y_true`.
-    y_var_pred : torch.Tensor
-        A tensor containing the predicted variance values, with the same shape as `y_true`.
+        A tensor containing predicted mean log-intensities, with the same shape
+        as `y_true`.
+    y_log_var_pred : torch.Tensor
+        A tensor containing predicted log variances, with the same shape as
+        `y_true`.
     y_missingness_pred : torch.Tensor
-        A tensor containing the predicted missingness logits, with the same shape as `y_true`.
+        A tensor containing predicted presence logits, with the same shape as
+        `y_true`. The legacy argument name is kept to avoid changing callers.
+    encoded_sequence : torch.Tensor
+        Tensor containing the number encoded sequence. Shape is equal to
+        `(batch_size, max_seq_len)`.
+    fragments_per_cleavage : int, optional
+        Number of fragment-ion channels predicted per peptide cleavage. Inferred
+        from tensor shape when omitted.
+    has_termini : bool, optional
+        Whether encoded sequences include N- and C-terminal tokens.
 
     Returns
     -------
     torch.Tensor
-        A tensor containing the sum of the GaussianNLL and BCE loss.
+        Mean per-valid-fragment mixture negative log likelihood.
 
     """
-    
-    # To avoid numerical instability during training on GPUs,
-    # epsilon is utilized
     epsilon = 1e-7
 
-    # Getting indicies of which y values are NOT 0 or -1
-    present = y_true > 0
+    # Autocast may run the model in bf16/fp16. Keep the probabilistic loss in
+    # fp32; tiny variances and log-intensity errors are exactly where reduced
+    # precision can turn a large finite loss into inf/NaN.
+    y_true = y_true.float()
+    y_mean_pred = y_mean_pred.float()
+    y_log_var_pred = y_log_var_pred.float()
+    y_missingness_pred = y_missingness_pred.float()
 
-    # Masking
-    # Cloning y_true to ensure that the in-place changes does not effect other
-    # parts of the y_true vector use
-    y_true_masked = y_true.clone()
-    # Will set -1 values to 0
-    y_true_masked[~present] = 0
-    missingness_target = torch.clone(y_true_masked)
+    # possible: positions that can exist for each peptide length.
+    # y_true >= 0: remove -1 sentinels for impossible/unannotated ions. Combining
+    # the two gives the domain k in b,y over which the mixture likelihood is
+    # defined for this batch.
+    possible = _possible_fragment_mask(
+        y_true,
+        encoded_sequence,
+        fragments_per_cleavage=fragments_per_cleavage,
+        has_termini=has_termini,
+    )
+    valid = possible & (y_true >= 0)
+    present = valid & (y_true > 0)
 
-    # To predict missingness; all elements with y_true > 0 will be 0, and 
-    # others will be 1 as they are missing.
-    # This tensor will only contains 1:s and 0:s afterward
-    missingness_target[present] = 0
-    missingness_target[~present] = 1
+    if not torch.any(valid):
+        raise ValueError(
+            "No valid fragment ions remain after applying peptide-length and -1 masks. "
+            "Check encoded_sequence, has_termini, fragments_per_cleavage, and target shape."
+        )
 
-    # Clamp variance before GaussianNLL to epsilon as to avoid explosion
-    var_clamped = torch.clamp(y_var_pred, min = epsilon)
+    # BCEWithLogitsLoss implements:
+    #   -t_k * log(sigmoid(logit_k)) - (1 - t_k) * log(1 - sigmoid(logit_k))
+    # which is exactly the Bernoulli part of the pasted mixture objective:
+    #   -log p_k for y_k > 0, and -log(1 - p_k) for y_k = 0.
+    # We use reduction="sum" first so the final normalization is controlled by
+    # the same valid-fragment count as the full mixture loss.
+    presence_target = present.to(dtype=y_missingness_pred.dtype)
+    presence_loss = F.binary_cross_entropy_with_logits(
+        y_missingness_pred[valid], presence_target[valid], reduction="sum"
+    )
 
-    # First part of the loss function
-    # The tensors will be trained to be means and variances,
-    # even if the function is preformed in log space.
-    nll = torch.nn.GaussianNLLLoss(eps=epsilon, reduction='mean')
-    nll_loss = nll(input=y_mean_pred, target=y_true_masked, var=var_clamped)
+    if not torch.isfinite(y_mean_pred[valid]).all():
+        raise ValueError("Non-finite predicted log-intensity mean in valid fragments.")
+    if not torch.isfinite(y_log_var_pred[valid]).all():
+        raise ValueError("Non-finite predicted log variance in valid fragments.")
+    if not torch.isfinite(y_missingness_pred[valid]).all():
+        raise ValueError("Non-finite predicted presence logits in valid fragments.")
 
-    #TODO: casting (?) requires BCEWithLogitsLoss, therefore change code back to using logits (done),
-    # and add a conversion for the output instead. See WandB logs.
-    # Second part of the loss function
-    presence_loss = torch.nn.BCEWithLogitsLoss(reduction="mean")
-    presence = presence_loss(y_missingness_pred, missingness_target) 
+    if torch.any(present):
+        # The Gaussian term in the derivation is over log(y_k + eps), not raw
+        # intensity. Therefore the model's mean head is interpreted as mu_k in
+        # log-intensity space, and the target passed to GaussianNLL is log y.
+        log_target = torch.log(y_true[present].to(dtype=y_mean_pred.dtype) + epsilon)
 
-    total_loss = nll_loss + presence
+        # Use the standard log-variance parameterization s = log(sigma^2):
+        #   GaussianNLL_k = 0.5 * (exp(-s_k) * (log_y_k - mu_k)^2
+        #                         + s_k + log(2*pi))
+        # This is algebraically the same Gaussian NLL as PyTorch's
+        # gaussian_nll_loss with var=sigma^2, but avoids requiring the network
+        # to output a strictly positive variance directly. Keep this unclamped
+        # for the baseline experiment so out-of-range log variances still get
+        # gradients from the likelihood instead of hitting clamp dead zones.
+        log_var = y_log_var_pred[present]
+        squared_error = torch.square(log_target - y_mean_pred[present])
+        intensity_loss = 0.5 * (
+            torch.exp(-log_var) * squared_error
+            + log_var
+            + torch.log(
+                torch.tensor(2.0 * np.pi, device=log_var.device, dtype=log_var.dtype)
+            )
+        )
+        intensity_loss = intensity_loss.sum()
+    else:
+        # This is not a data-repair guard: if all valid ions are observed as zero,
+        # the derivation's sum over {k: y_k > 0} is an empty sum, i.e. zero. The
+        # batch still trains through the Bernoulli absence terms above.
+        intensity_loss = y_mean_pred.sum() * 0.0
 
-    return total_loss
+    total_loss = presence_loss + intensity_loss
+    normalizer = valid.sum().to(dtype=total_loss.dtype)
+    return total_loss / normalizer

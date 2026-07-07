@@ -60,6 +60,14 @@ data_root = Path(os.environ.get("DATA_HOME", str(DATA_ROOT))).expanduser()
 data_location = Path(os.environ.get("DATA_LOCATION", str(data_root / "data"))
 ).expanduser()
 
+
+def _env_bool(name: str, default: bool) -> bool:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
 os.environ.setdefault("DLOMIX_BACKEND", "torch")
 
 import torch
@@ -85,7 +93,7 @@ CONFIG = {
     "val": f"{str(data_location)}/all_val_ptms_fixed_na.parquet",
     "test": f"{str(data_location)}/test.parquet",
     # Bool for model selection, false will use the current Prosit standard of masked spectral distance
-    "uncertainty_aware": eval(os.environ.get("UNCERTAINTY_AWARE", True)),
+    "uncertainty_aware": _env_bool("UNCERTAINTY_AWARE", True),
     # --- Training loop (evidence: `run_scripts/run_prosit_intensity_torch.py`,
     # `run_scripts/run_prosit_intensity_ptms_torch.py`, and TF scripts) ---
     "epochs": int(os.environ.get("N_EPOCHS", 120)),  # according to (2) PROSIT-PTM (FII: max 120 epochs with early stopping)
@@ -117,10 +125,10 @@ CONFIG = {
     "collision_energy_column": "collision_energy_aligned_normed",
     "precursor_charge_column": "precursor_charge_onehot",
     "ptm_features": "mod_loss,delta_mass",
-    "debug_unknown_tokens": False,
-    "max_train_batches": 0,  # 0 = no cap (useful to set small for debugging)
-    "max_val_batches": 0,
-    "max_test_batches": 0,
+    "debug_unknown_tokens": _env_bool("DEBUG_UNKNOWN_TOKENS", False),
+    "max_train_batches": int(os.environ.get("MAX_TRAIN_BATCHES", 0)),  # 0 = no cap
+    "max_val_batches": int(os.environ.get("MAX_VAL_BATCHES", 0)),
+    "max_test_batches": int(os.environ.get("MAX_TEST_BATCHES", 0)),
     "save": None,
     "checkpoint_save": os.environ.get("CHECKPOINT_DIR", None), # Give as /path/to/dir
     # --- Optional torch.compile acceleration ---
@@ -130,19 +138,19 @@ CONFIG = {
     "torch_compile_fullgraph": False,
     "torch_compile_dynamic": False,
     # --- Optional mixed precision ---
-    "use_amp": True,
-    "amp_dtype": "bf16",  # bf16 | fp16 | float16 | bfloat16
+    "use_amp": _env_bool("USE_AMP", False),
+    "amp_dtype": os.environ.get("AMP_DTYPE", "bf16"),  # bf16 | fp16 | float16 | bfloat16
     # --- Optional CUDA math acceleration ---
     "enable_tf32": True,
     "float32_matmul_precision": "high",  # one of: highest, high, medium
     # --- Optional profiling ---
-    "profile_timing": False,
+    "profile_timing": _env_bool("PROFILE_TIMING", False),
     "profile_warmup_batches": 100,
     "profile_num_batches": 500,
     "profile_log_every": 100,
     "profile_cuda_sync": True,  # needed for accurate CUDA phase timing
-    "profile_dataloader_only_batches": 0,  # if >0, run loader-only benchmark then exit
-    "profile_dataloader_move_to_device": False,
+    "profile_dataloader_only_batches": int(os.environ.get("PROFILE_DATALOADER_ONLY_BATCHES", 0)),  # if >0, run loader-only benchmark then exit
+    "profile_dataloader_move_to_device": _env_bool("PROFILE_DATALOADER_MOVE_TO_DEVICE", False),
     # --- Optional optimizer / stability knobs (evidence: repo examples) ---
     "grad_clip_max_norm": 1.0,  # evidence: torch intensity examples clip with max_norm=1
     # "weight_decay": 0.0,  # evidence: not used in repo examples; keep off unless you add it intentionally
@@ -152,7 +160,11 @@ CONFIG = {
     "clr_max_lr": 2e-4,  # according to (2) PROSIT-PTM (upper lr bound)
     "clr_scale_gamma": 0.95,  # according to (2) PROSIT-PTM (upper bound scaled by 0.95 every 8 epochs)
     "clr_scale_every_epochs": 8,  # according to (2) PROSIT-PTM
-    "early_stopping_patience": 16,  # according to (2) PROSIT-PTM (stop if val doesn't improve for 16 epochs)
+    # Disabled by default: for the uncertainty-aware objective, validation NLL
+    # can move differently from spectral angle/MAE because it also includes
+    # variance calibration and presence probabilities. Set >0 to re-enable.
+    "early_stopping_patience": int(os.environ.get("EARLY_STOPPING_PATIENCE", 0)),
+    "select_best_by_val_loss": _env_bool("SELECT_BEST_BY_VAL_LOSS", False),
     # --- Optional training control (evidence: TF examples) ---
     # "use_reduce_on_plateau": True,  # evidence: TF Prosit scripts use ReduceLROnPlateau
     # "reduce_factor": 0.1,  # evidence: `run_scripts/run_prosit_intensity.py`, `run_scripts/run_prosit_intensity_ptms.py`
@@ -472,6 +484,136 @@ def _cast_batch_types(batch: dict, columns: ColumnConfig) -> dict:
     return batch
 
 
+def _log_mean_to_intensity(pred_mean: torch.Tensor, epsilon: float = 1e-7) -> torch.Tensor:
+    # The uncertainty-aware mean head predicts mu in log-intensity space.
+    # Metrics such as MAE and spectral angle operate on raw nonnegative
+    # intensities, so convert exp(mu) - eps. Clamp only to avoid metric-side
+    # overflow if a bad run emits very large positive log means.
+    return torch.clamp(torch.exp(torch.clamp(pred_mean.detach().float(), max=20.0)) - epsilon, min=0.0)
+
+
+def _target_intensity_for_metrics(y_true: torch.Tensor) -> torch.Tensor:
+    target = y_true.detach().float().clone()
+    target[target < 0] = 0
+    return target
+
+
+def _mae_from_log_mean(y_true: torch.Tensor, pred_mean: torch.Tensor) -> float:
+    pred_intensity = _log_mean_to_intensity(pred_mean)
+    target = _target_intensity_for_metrics(y_true)
+    return torch.mean(torch.abs(pred_intensity - target)).item()
+
+
+def _spectral_angle_from_log_mean(y_true: torch.Tensor, pred_mean: torch.Tensor) -> float:
+    pred_intensity = _log_mean_to_intensity(pred_mean)
+    return 1.0 - masked_spectral_distance(y_true.detach().float(), pred_intensity).item()
+
+
+def _variance_diagnostics(
+    y_true: torch.Tensor,
+    pred_mean: torch.Tensor,
+    pred_log_var: torch.Tensor,
+    prefix: str,
+    epsilon: float = 1e-7,
+) -> dict:
+    # The Gaussian term is only evaluated for present fragments, so these
+    # diagnostics use the same domain. The loss itself remains unclamped; the
+    # metric-side exp() is clipped only to avoid logging inf values to W&B.
+    y_true = y_true.detach().float()
+    pred_mean = pred_mean.detach().float()
+    pred_log_var = pred_log_var.detach().float()
+
+    present = y_true > 0
+    if not torch.any(present):
+        return {}
+
+    log_var = pred_log_var[present]
+    finite = torch.isfinite(log_var)
+    if not torch.any(finite):
+        return {}
+
+    log_var = log_var[finite]
+    log_target = torch.log(y_true[present][finite] + epsilon)
+    squared_log_residual = torch.square(log_target - pred_mean[present][finite])
+
+    log_var_for_exp = torch.clamp(log_var, min=-30.0, max=30.0)
+    pred_var = torch.exp(log_var_for_exp)
+    pred_sigma = torch.exp(0.5 * log_var_for_exp)
+    calibration_ratio = squared_log_residual / torch.clamp(pred_var, min=1e-12)
+
+    return {
+        f"{prefix}_pred_var_present_mean": pred_var.mean().item(),
+        f"{prefix}_pred_var_present_max": pred_var.max().item(),
+        f"{prefix}_pred_sigma_present_mean": pred_sigma.mean().item(),
+        f"{prefix}_variance_calibration_ratio_present_mean": calibration_ratio
+        .mean()
+        .item(),
+    }
+
+
+def _tensor_summary(name: str, tensor: torch.Tensor) -> str:
+    data = tensor.detach().float()
+    finite = torch.isfinite(data)
+    finite_count = int(finite.sum().item())
+    total = data.numel()
+    if finite_count == 0:
+        return f"{name}: shape={tuple(data.shape)} finite=0/{total}"
+    finite_data = data[finite]
+    return (
+        f"{name}: shape={tuple(data.shape)} finite={finite_count}/{total} "
+        f"min={finite_data.min().item():.6g} max={finite_data.max().item():.6g} "
+        f"mean={finite_data.mean().item():.6g}"
+    )
+
+
+def _raise_for_nonfinite_loss(
+    loss: torch.Tensor,
+    *,
+    epoch: int,
+    train_batches: int,
+    batch: dict,
+    columns: ColumnConfig,
+    pred_mean: torch.Tensor,
+    pred_log_var: torch.Tensor,
+    pred_missing_logit: torch.Tensor,
+) -> None:
+    if torch.isfinite(loss):
+        return
+
+    y_true = batch[columns.label]
+    valid = y_true >= 0
+    present = y_true > 0
+    msg = [
+        f"Non-finite training loss at epoch={epoch} batch={train_batches + 1}: {loss.item()}",
+        f"label valid={int(valid.sum().item())}/{valid.numel()} present={int(present.sum().item())}/{present.numel()}",
+        _tensor_summary("y_true", y_true),
+        _tensor_summary("pred_mean_log", pred_mean),
+        _tensor_summary("pred_log_var", pred_log_var),
+        _tensor_summary("pred_presence_logit", pred_missing_logit),
+    ]
+    raise FloatingPointError("\n".join(msg))
+
+
+
+def _configure_wandb_axes() -> None:
+    # Make a single x-axis available for every panel. W&B's default `_step` is
+    # just the number of log calls, and separate `train_step`/`val_step` fields
+    # are awkward to use in shared train/validation dashboards.
+    wandb.define_metric("global_step")
+    for pattern in (
+        "train_*",
+        "val_*",
+        "current_epoch_*",
+        "epoch_average_*",
+    ):
+        wandb.define_metric(pattern, step_metric="global_step")
+
+
+def _wandb_log(run, global_step: int, metrics: dict) -> int:
+    run.log({"global_step": global_step, **metrics})
+    return global_step + 1
+
+
 def _print_ptm_handling_probe(
     *,
     parquet_path: str,
@@ -597,6 +739,9 @@ def main() -> int:
     device = _device_from_torch()
     print(f"Using device: {device}")
 
+    if args.checkpoint_save:
+        os.makedirs(args.checkpoint_save, exist_ok=True)
+
     # Initialize wandb
     if args.uncertainty_aware == True:
         run = wandb.init(
@@ -718,6 +863,8 @@ def main() -> int:
                 "dropout_rate": args.dropout_rate,
             }
         )
+
+    _configure_wandb_axes()
 
     if device.type == "cuda":
         try:
@@ -866,6 +1013,7 @@ def main() -> int:
 
     grad_clip = float(getattr(args, "grad_clip_max_norm", 1.0))
     early_patience = int(getattr(args, "early_stopping_patience", 0) or 0)
+    select_best_by_val_loss = bool(getattr(args, "select_best_by_val_loss", False)) or early_patience > 0
 
     best_val_loss = float("inf")
     best_state = None
@@ -916,6 +1064,8 @@ def main() -> int:
             f"[profile] enabled (warmup={profile_warmup}, sample_batches={profile_num_batches}, "
             f"log_every={profile_log_every}, cuda_sync={profile_cuda_sync})"
         )
+    global_step = 0
+
     if args.uncertainty_aware == True:
         print("Running uncertainty aware training")
         train_step = 0
@@ -966,7 +1116,7 @@ def main() -> int:
                     _maybe_cuda_sync(device, profile_cuda_sync)
                     t_fwd_0 = time.perf_counter()
                 with _amp_autocast_context(device, amp_enabled, amp_dtype):
-                    pred_mean, pred_var, pred_missing_logit = model(batch)
+                    pred_mean, pred_log_var, pred_missing_logit = model(batch)
                     if do_profile:
                         _maybe_cuda_sync(device, profile_cuda_sync)
                         forward_s = time.perf_counter() - t_fwd_0
@@ -1003,7 +1153,17 @@ def main() -> int:
                     if do_profile:
                         _maybe_cuda_sync(device, profile_cuda_sync)
                         t_loss_0 = time.perf_counter()
-                    loss = gaussian_nll(batch[columns.label], pred_mean, pred_var, pred_missing_logit)
+                    loss = gaussian_nll(batch[columns.label], pred_mean, pred_log_var, pred_missing_logit, batch[columns.sequence])
+                    _raise_for_nonfinite_loss(
+                        loss,
+                        epoch=epoch,
+                        train_batches=train_batches,
+                        batch=batch,
+                        columns=columns,
+                        pred_mean=pred_mean,
+                        pred_log_var=pred_log_var,
+                        pred_missing_logit=pred_missing_logit,
+                    )
                     if do_profile:
                         _maybe_cuda_sync(device, profile_cuda_sync)
                         loss_s = time.perf_counter() - t_loss_0
@@ -1043,41 +1203,30 @@ def main() -> int:
                 train_batches += 1
                 train_it.set_postfix(loss=f"{loss.item():.4f}")
 
-                # Use the mean as an approximation of y_pred for mean absolute error and spectral angle approximation
-                # Create a y_true that is the batch[columns.label] with -1 values turned into 0
-                y_true = batch[columns.label].detach()
-                present = y_true > 0
-                y_true[~present] = 0
-
-                # Mean absolute error calculation
-                batch_mae = torch.mean(torch.abs(torch.sub(pred_mean, y_true))).item()
-
-                # Mean spectral angle calculation
-                epsilon = 1e-7
-                msa_pred = pred_mean.detach()               # To prevent unneccesary memory usage detach the gradient mapping
-                msa_true = y_true.detach()                  # To prevent unneccesary memory usage detach the gradient mapping
-                pred_masked = ((msa_true + 1) * msa_pred) / (msa_true + 1 + epsilon)
-                true_masked = ((msa_true + 1) * msa_true) / (msa_true + 1 + epsilon)
-                true_norm = torch.nn.functional.normalize(true_masked, p=2, dim=-1)
-                pred_norm = torch.nn.functional.normalize(pred_masked, p=2, dim=-1)
-                product = (pred_norm * true_norm).sum(dim=-1)
-                product = torch.clamp(product, -1.0 + epsilon, 1.0 - epsilon)
-                arccos = torch.arccos(product)
-                batch_msa = 1 - torch.mean(2 * arccos / np.pi).item()
+                batch_mae = _mae_from_log_mean(batch[columns.label], pred_mean)
+                batch_msa = _spectral_angle_from_log_mean(
+                    batch[columns.label], pred_mean
+                )
+                batch_variance_stats = _variance_diagnostics(
+                    batch[columns.label], pred_mean, pred_log_var, "train_batch"
+                )
 
                 train_mae_total += batch_mae
                 train_msa_total += batch_msa
 
                 train_step += 1
 
-                run.log({
+                train_metrics = {
                     "train_step": train_step,
                     "train_batch_loss": loss.item(),
                     "train_loss_total": train_loss_total,
-                    "current_epoch_average_train_loss": train_loss_total / max(1, train_batches),
+                    "current_epoch_average_train_loss": train_loss_total
+                    / max(1, train_batches),
                     "train_batch_mean_absolute_error": batch_mae,
                     "train_batch_mean_spectral_angle": batch_msa,
-                })
+                }
+                train_metrics.update(batch_variance_stats)
+                global_step = _wandb_log(run, global_step, train_metrics)
 
                 iter_end = time.perf_counter()
                 if do_profile:
@@ -1120,46 +1269,45 @@ def main() -> int:
                     batch = _move_batch_to_device(batch, device)
                     batch = _cast_batch_types(batch, columns)
                     with _amp_autocast_context(device, amp_enabled, amp_dtype):
-                        pred_mean, pred_var, pred_missing_logit = model(batch)
-                        val_loss = gaussian_nll(batch[columns.label], pred_mean, pred_var, pred_missing_logit)
+                        pred_mean, pred_log_var, pred_missing_logit = model(batch)
+                        val_loss = gaussian_nll(batch[columns.label], pred_mean, pred_log_var, pred_missing_logit, batch[columns.sequence])
+                    _raise_for_nonfinite_loss(
+                        val_loss,
+                        epoch=epoch,
+                        train_batches=val_batches,
+                        batch=batch,
+                        columns=columns,
+                        pred_mean=pred_mean,
+                        pred_log_var=pred_log_var,
+                        pred_missing_logit=pred_missing_logit,
+                    )
                     val_loss_total += val_loss.item()
                     val_batches += 1
                     
-                    # Use the mean as an approximation of y_pred for mean absolute error and spectral angle approximation
-                    # Create a y_true that is the batch[columns.label] with -1 values turned into 0
-                    y_true = batch[columns.label].detach()
-                    present = y_true > 0
-                    y_true[~present] = 0
-
-                    # Mean absolute error calculation
-                    batch_mae = torch.mean(torch.abs(torch.sub(pred_mean, y_true))).item()
-
-                    # Mean spectral angle calculation (just 1 - loss value for standard prosit)
-                    epsilon = 1e-7
-                    msa_pred = pred_mean.detach()                   # To prevent unneccesary memory usage detach the gradient mapping
-                    msa_true = y_true.detach()        # To prevent unneccesary memory usage detach the gradient mapping
-                    pred_masked = ((msa_true + 1) * msa_pred) / (msa_true + 1 + epsilon)
-                    true_masked = ((msa_true + 1) * msa_true) / (msa_true + 1 + epsilon)
-                    true_norm = torch.nn.functional.normalize(true_masked, p=2, dim=-1)
-                    pred_norm = torch.nn.functional.normalize(pred_masked, p=2, dim=-1)
-                    product = (pred_norm * true_norm).sum(dim=-1)
-                    product = torch.clamp(product, -1.0 + epsilon, 1.0 - epsilon)
-                    arccos = torch.arccos(product)
-                    batch_msa = 1 - torch.mean(2 * arccos / np.pi)
+                    batch_mae = _mae_from_log_mean(batch[columns.label], pred_mean)
+                    batch_msa = _spectral_angle_from_log_mean(
+                        batch[columns.label], pred_mean
+                    )
+                    batch_variance_stats = _variance_diagnostics(
+                        batch[columns.label], pred_mean, pred_log_var, "val_batch"
+                    )
 
                     val_mean_absolute_error_total += batch_mae
                     val_spectral_angle_total += batch_msa
 
                     val_step += 1
 
-                    run.log({
+                    val_metrics = {
                         "val_step": val_step,
                         "val_batch_loss": val_loss.item(),
                         "val_loss_total": val_loss_total,
-                        "current_epoch_average_val_loss": val_loss_total / max(1, val_batches),
+                        "current_epoch_average_val_loss": val_loss_total
+                        / max(1, val_batches),
                         "val_batch_mean_absolute_error": batch_mae,
                         "val_batch_mean_spectral_angle": batch_msa,
-                    })
+                    }
+                    val_metrics.update(batch_variance_stats)
+                    global_step = _wandb_log(run, global_step, val_metrics)
 
                     val_it.set_postfix(loss=f"{val_loss.item():.4f}")
                     if args.max_val_batches and val_batches >= args.max_val_batches:
@@ -1168,16 +1316,16 @@ def main() -> int:
             avg_val_mae = val_mean_absolute_error_total / max(1, val_batches)
             avg_val_sa = val_spectral_angle_total / max(1, val_batches)
 
-            # As negative log likelihood will generate a negative number (unless I've misunderstood) if avg is higher than best there's been no improvement
-            if avg_val_loss < best_val_loss:
-                best_val_loss = avg_val_loss
-                raw_model = _unwrap_model_for_state_dict(model)
-                best_state = {
-                    k: v.detach().cpu() for k, v in raw_model.state_dict().items()
-                }
-                epochs_without_improvement = 0
-            else:
-                epochs_without_improvement += 1
+            if select_best_by_val_loss:
+                if avg_val_loss < best_val_loss:
+                    best_val_loss = avg_val_loss
+                    raw_model = _unwrap_model_for_state_dict(model)
+                    best_state = {
+                        k: v.detach().cpu() for k, v in raw_model.state_dict().items()
+                    }
+                    epochs_without_improvement = 0
+                else:
+                    epochs_without_improvement += 1
 
             print(
                 f"Epoch {epoch:03d}: train_loss={avg_train_loss:.6f} val_loss={avg_val_loss:.6f}"
@@ -1189,7 +1337,7 @@ def main() -> int:
                     )
                 )
             
-            run.log({
+            global_step = _wandb_log(run, global_step, {
                 "epoch": epoch,
                 "epoch_average_train_loss": avg_train_loss, 
                 "epoch_average_train_mean_absolute_error": avg_train_mae,
@@ -1349,7 +1497,7 @@ def main() -> int:
                 
                 # pred is the predicted mean when using the spectral angle based loss function
                 # Create a y_true that is the batch[columns.label] with -1 values turned into 0
-                y_true = batch[columns.label].detach()
+                y_true = batch[columns.label].detach().clone()
                 present = y_true > 0
                 y_true[~present] = 0
                 batch_mae = torch.mean(torch.abs(torch.sub(pred, y_true))).item()
@@ -1361,7 +1509,7 @@ def main() -> int:
 
                 train_step += 1
 
-                run.log({
+                global_step = _wandb_log(run, global_step, {
                     "train_step": train_step,
                     "train_batch_loss": loss.item(),
                     "train_loss_total": train_loss_total,
@@ -1417,7 +1565,7 @@ def main() -> int:
                     val_batches += 1
 
                     # pred is the predicted mean when using the spectral angle based loss function
-                    y_true = batch[columns.label].detach()
+                    y_true = batch[columns.label].detach().clone()
                     present = y_true > 0
                     y_true[~present] = 0
                     batch_mae = torch.mean(torch.abs(torch.sub(pred, y_true))).item()
@@ -1429,7 +1577,7 @@ def main() -> int:
 
                     val_step += 1
 
-                    run.log({
+                    global_step = _wandb_log(run, global_step, {
                         "val_step": val_step,
                         "val_batch_loss": val_loss.item(),
                         "val_loss_total": val_loss_total,
@@ -1445,15 +1593,16 @@ def main() -> int:
             avg_val_mae = val_mean_absolute_error_total / max(1, val_batches)
             avg_val_sa = val_spectral_angle_total / max(1, val_batches)
 
-            if avg_val_loss < best_val_loss:
-                best_val_loss = avg_val_loss
-                raw_model = _unwrap_model_for_state_dict(model)
-                best_state = {
-                    k: v.detach().cpu() for k, v in raw_model.state_dict().items()
-                }
-                epochs_without_improvement = 0
-            else:
-                epochs_without_improvement += 1
+            if select_best_by_val_loss:
+                if avg_val_loss < best_val_loss:
+                    best_val_loss = avg_val_loss
+                    raw_model = _unwrap_model_for_state_dict(model)
+                    best_state = {
+                        k: v.detach().cpu() for k, v in raw_model.state_dict().items()
+                    }
+                    epochs_without_improvement = 0
+                else:
+                    epochs_without_improvement += 1
 
             print(
                 f"Epoch {epoch:03d}: train_loss={avg_train_loss:.6f} val_loss={avg_val_loss:.6f}"
@@ -1465,7 +1614,7 @@ def main() -> int:
                     )
                 )
 
-            run.log({
+            global_step = _wandb_log(run, global_step, {
                 "epoch": epoch,
                 "epoch_average_train_loss": avg_train_loss, 
                 "epoch_average_train_mean_absolute_error": avg_train_mae,
@@ -1504,6 +1653,11 @@ def main() -> int:
             os.makedirs(os.path.dirname(args.save) or ".", exist_ok=True)
             torch.save(best_state, args.save)
             print(f"Saved best model to: {args.save}")
+    elif args.save:
+        raw_model = _unwrap_model_for_state_dict(model)
+        os.makedirs(os.path.dirname(args.save) or ".", exist_ok=True)
+        torch.save(raw_model.state_dict(), args.save)
+        print(f"Saved final model to: {args.save}")
 
     # Test
     if args.uncertainty_aware == True:
@@ -1523,8 +1677,8 @@ def main() -> int:
                     batch = _move_batch_to_device(batch, device)
                     batch = _cast_batch_types(batch, columns)
                     with _amp_autocast_context(device, amp_enabled, amp_dtype):
-                        pred_mean, pred_var, pred_missing_logit = model(batch)
-                        test_loss = gaussian_nll(batch[columns.label], pred_mean, pred_var, pred_missing_logit)
+                        pred_mean, pred_log_var, pred_missing_logit = model(batch)
+                        test_loss = gaussian_nll(batch[columns.label], pred_mean, pred_log_var, pred_missing_logit, batch[columns.sequence])
                     test_loss_total += test_loss.item()
                     test_batches += 1
                     test_it.set_postfix(loss=f"{test_loss.item():.4f}")

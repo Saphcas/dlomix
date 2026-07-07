@@ -12,6 +12,7 @@ from dlomix.losses.intensity_torch import (
     masked_pearson_correlation_distance as masked_pearson_correlation_distance_torch,
 )
 from dlomix.losses.intensity_torch import (
+    gaussian_nll,
     masked_spectral_distance as masked_spectral_distance_torch,
 )
 
@@ -65,3 +66,90 @@ def test_tf_torch_equivalence_masked_pearson_correlation_distance():
 
 
 # add tests for IonMobLoss
+
+# ------------------ intensity - zero-inflated Gaussian NLL ------------------
+
+
+def test_gaussian_nll_masks_impossible_fragments_and_uses_log_targets():
+    eps = 1e-7
+    y_true = torch.tensor(
+        [
+            [1.0, 0.0, -1.0, 0.5, 0.7, -1.0],
+            [0.0, 2.0, 1.0, -1.0, -1.0, -1.0],
+        ]
+    )
+    encoded_sequence = torch.tensor(
+        [
+            [21, 1, 2, 3, 22, 0],
+            [21, 1, 2, 22, 0, 0],
+        ]
+    )
+
+    safe_target = torch.where(y_true > 0, y_true, torch.ones_like(y_true))
+    y_mean_pred = torch.log(safe_target + eps)
+    y_log_var_pred = torch.zeros_like(y_true)
+    presence_logits = torch.zeros_like(y_true)
+
+    loss = gaussian_nll(
+        y_true,
+        y_mean_pred,
+        y_log_var_pred,
+        presence_logits,
+        encoded_sequence,
+        fragments_per_cleavage=2,
+    )
+
+    valid_count = 5
+    present_count = 3
+    expected_bce = valid_count * torch.nn.functional.binary_cross_entropy_with_logits(
+        torch.tensor(0.0), torch.tensor(1.0), reduction="sum"
+    )
+    expected_nll = present_count * (0.5 * torch.log(torch.tensor(2.0 * np.pi)))
+    expected = (expected_bce + expected_nll) / valid_count
+
+    assert torch.allclose(loss, expected, atol=1e-6)
+
+
+def test_gaussian_nll_handles_batches_without_present_fragments():
+    y_true = torch.tensor([[0.0, 0.0, -1.0, -1.0]])
+    encoded_sequence = torch.tensor([[21, 1, 2, 22]])
+    y_mean_pred = torch.zeros_like(y_true)
+    y_log_var_pred = torch.zeros_like(y_true)
+    presence_logits = torch.zeros_like(y_true)
+
+    loss = gaussian_nll(
+        y_true,
+        y_mean_pred,
+        y_log_var_pred,
+        presence_logits,
+        encoded_sequence,
+        fragments_per_cleavage=2,
+    )
+
+    expected = torch.nn.functional.binary_cross_entropy_with_logits(
+        torch.tensor(0.0), torch.tensor(0.0), reduction="sum"
+    )
+    assert torch.isfinite(loss)
+    assert torch.allclose(loss, expected, atol=1e-6)
+
+
+def test_gaussian_nll_raises_when_no_valid_fragments_remain():
+    y_true = torch.tensor([[-1.0, -1.0]])
+    encoded_sequence = torch.tensor([[21, 1, 2, 22]])
+    y_mean_pred = torch.zeros_like(y_true)
+    y_log_var_pred = torch.zeros_like(y_true)
+    presence_logits = torch.zeros_like(y_true)
+
+    try:
+        gaussian_nll(
+            y_true,
+            y_mean_pred,
+            y_log_var_pred,
+            presence_logits,
+            encoded_sequence,
+            fragments_per_cleavage=2,
+        )
+    except ValueError as exc:
+        assert "No valid fragment ions remain" in str(exc)
+    else:
+        raise AssertionError("Expected gaussian_nll to raise ValueError")
