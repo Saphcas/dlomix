@@ -1,0 +1,17 @@
+Bootstrap: localimage
+From: /nobackup/proj/disk/kall/shared/containers/pytorch-ngc-26.06-py3.sif
+
+%files
+    apptainer/requirements-container.txt /requirements-container.txt
+    . /opt/dlomix-src
+
+%post
+    set -eu
+    python -m pip install --no-cache-dir --root-user-action=ignore --upgrade pip
+    python -m pip install --no-cache-dir --root-user-action=ignore -r /requirements-container.txt
+    python -m pip install --no-cache-dir --root-user-action=ignore --no-deps /opt/dlomix-src
+    rm -f /requirements-container.txt
+
+%environment
+    export PYTHONUNBUFFERED=1
+    export DLOMIX_BACKEND=pytorch

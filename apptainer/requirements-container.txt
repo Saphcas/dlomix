@@ -1,0 +1,13 @@
+datasets>=4.0.0
+huggingface_hub
+fpdf
+pandas
+numpy
+matplotlib
+scikit-learn
+pyarrow
+seaborn
+wandb>=0.20.0
+lightning
+pytest>=7.0.0
+pytest-cov
