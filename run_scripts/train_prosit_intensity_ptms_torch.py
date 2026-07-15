@@ -104,7 +104,7 @@ CONFIG = {
     # "batch_size": 8,  # evidence: PTM torch example uses 8
     # "batch_size": 128,  # evidence: non-PTM torch example + TF PTM script use 128
     # "batch_size": 512,  # according to (1) PROSIT (paper reports batch size 512)
-    "lr": 2e-4,  # according to (2) PROSIT-PTM (upper CLR bound; used when `use_clr=True`)
+    "lr": float(os.environ.get("LEARNING_RATE", 2e-4)),  # according to (2) PROSIT-PTM (upper CLR bound; used when `use_clr=False`)
     # "lr": 1e-4,  # evidence: all Prosit example scripts use Adam(lr=1e-4)
     # "lr": 1e-3,  # according to (1) PROSIT (paper reports initial lr=0.001)
     "max_seq_len": 32,  # evidence: PTM examples use 32 (non-PTM intensity uses 30)
@@ -155,7 +155,7 @@ CONFIG = {
     "grad_clip_max_norm": 1.0,  # evidence: torch intensity examples clip with max_norm=1
     # "weight_decay": 0.0,  # evidence: not used in repo examples; keep off unless you add it intentionally
     # --- PROSIT-PTM FII schedule knobs (paper hyperparameters) ---
-    "use_clr": True,  # according to (2) PROSIT-PTM (FII uses cyclic learning rate)
+    "use_clr": _env_bool("USE_CLR", True),  # according to (2) PROSIT-PTM (FII uses cyclic learning rate)
     "clr_base_lr": 1e-5,  # according to (2) PROSIT-PTM (lower lr bound)
     "clr_max_lr": 2e-4,  # according to (2) PROSIT-PTM (upper lr bound)
     "clr_scale_gamma": 0.95,  # according to (2) PROSIT-PTM (upper bound scaled by 0.95 every 8 epochs)
@@ -484,12 +484,12 @@ def _cast_batch_types(batch: dict, columns: ColumnConfig) -> dict:
     return batch
 
 
-def _log_mean_to_intensity(pred_mean: torch.Tensor, epsilon: float = 1e-7) -> torch.Tensor:
+def _log_mean_to_intensity(pred_log_mean: torch.Tensor, epsilon: float = 1e-7) -> torch.Tensor:
     # The uncertainty-aware mean head predicts mu in log-intensity space.
     # Metrics such as MAE and spectral angle operate on raw nonnegative
     # intensities, so convert exp(mu) - eps. Clamp only to avoid metric-side
     # overflow if a bad run emits very large positive log means.
-    return torch.clamp(torch.exp(torch.clamp(pred_mean.detach().float(), max=20.0)) - epsilon, min=0.0)
+    return torch.clamp(torch.exp(torch.clamp(pred_log_mean.detach().float(), max=20.0)) - epsilon, min=0.0)
 
 
 def _target_intensity_for_metrics(y_true: torch.Tensor) -> torch.Tensor:
@@ -498,20 +498,20 @@ def _target_intensity_for_metrics(y_true: torch.Tensor) -> torch.Tensor:
     return target
 
 
-def _mae_from_log_mean(y_true: torch.Tensor, pred_mean: torch.Tensor) -> float:
-    pred_intensity = _log_mean_to_intensity(pred_mean)
+def _mae_from_log_mean(y_true: torch.Tensor, pred_log_mean: torch.Tensor) -> float:
+    pred_intensity = _log_mean_to_intensity(pred_log_mean)
     target = _target_intensity_for_metrics(y_true)
     return torch.mean(torch.abs(pred_intensity - target)).item()
 
 
-def _spectral_angle_from_log_mean(y_true: torch.Tensor, pred_mean: torch.Tensor) -> float:
-    pred_intensity = _log_mean_to_intensity(pred_mean)
+def _spectral_angle_from_log_mean(y_true: torch.Tensor, pred_log_mean: torch.Tensor) -> float:
+    pred_intensity = _log_mean_to_intensity(pred_log_mean)
     return 1.0 - masked_spectral_distance(y_true.detach().float(), pred_intensity).item()
 
 
 def _variance_diagnostics(
     y_true: torch.Tensor,
-    pred_mean: torch.Tensor,
+    pred_log_mean: torch.Tensor,
     pred_log_var: torch.Tensor,
     prefix: str,
     epsilon: float = 1e-7,
@@ -520,7 +520,7 @@ def _variance_diagnostics(
     # diagnostics use the same domain. The loss itself remains unclamped; the
     # metric-side exp() is clipped only to avoid logging inf values to W&B.
     y_true = y_true.detach().float()
-    pred_mean = pred_mean.detach().float()
+    pred_log_mean = pred_log_mean.detach().float()
     pred_log_var = pred_log_var.detach().float()
 
     present = y_true > 0
@@ -534,7 +534,7 @@ def _variance_diagnostics(
 
     log_var = log_var[finite]
     log_target = torch.log(y_true[present][finite] + epsilon)
-    squared_log_residual = torch.square(log_target - pred_mean[present][finite])
+    squared_log_residual = torch.square(log_target - pred_log_mean[present][finite])
 
     log_var_for_exp = torch.clamp(log_var, min=-30.0, max=30.0)
     pred_var = torch.exp(log_var_for_exp)
@@ -573,7 +573,7 @@ def _raise_for_nonfinite_loss(
     train_batches: int,
     batch: dict,
     columns: ColumnConfig,
-    pred_mean: torch.Tensor,
+    pred_log_mean: torch.Tensor,
     pred_log_var: torch.Tensor,
     pred_missing_logit: torch.Tensor,
 ) -> None:
@@ -587,7 +587,7 @@ def _raise_for_nonfinite_loss(
         f"Non-finite training loss at epoch={epoch} batch={train_batches + 1}: {loss.item()}",
         f"label valid={int(valid.sum().item())}/{valid.numel()} present={int(present.sum().item())}/{present.numel()}",
         _tensor_summary("y_true", y_true),
-        _tensor_summary("pred_mean_log", pred_mean),
+        _tensor_summary("pred_log_mean", pred_log_mean),
         _tensor_summary("pred_log_var", pred_log_var),
         _tensor_summary("pred_presence_logit", pred_missing_logit),
     ]
@@ -743,126 +743,65 @@ def main() -> int:
         os.makedirs(args.checkpoint_save, exist_ok=True)
 
     # Initialize wandb
-    if args.uncertainty_aware == True:
-        run = wandb.init(
-            entity="kall",
-            project="prosit_uncertainty_aware",
-            name=args.wandb_run_name,
-            # If additional config variables are uncommented under CONFIG add them here
-            config={
-                "learning_rate": args.lr,
-                "dataset":"PROSPECT",
-                "epochs":args.epochs,
-                "uncertainty_aware": args.uncertainty_aware, 
-                "batch_size": args.batch_size,
-                "max_seq_len": args.max_seq_len, 
-                "shuffle": args.shuffle,
-                "shuffle_buffer_size": args.shuffle_buffer_size,
-                "parquet_read_batch_size": args.parquet_read_batch_size,
-                "num_workers": args.num_workers,
-                "pin_memory": args.pin_memory,
-                "persistent_workers": args.persistent_workers,
-                "prefetch_factor": args.prefetch_factor,
-                "in_order": args.in_order,
-                "with_termini": args.with_termini,
-                "encoding_scheme": args.encoding_scheme,
-                "sequence_column": args.sequence_column,
-                "label_column": args.label_column,
-                "collision_energy_column": args.collision_energy_column,
-                "precursor_charge_column": args.precursor_charge_column,
-                "ptm_features": args.ptm_features,
-                "debug_unknown_tokens": args.debug_unknown_tokens,
-                "max_train_batches": args.max_train_batches,
-                "max_val_batches": args.max_val_batches,
-                "max_test_batches": args.max_test_batches,
-                "save": args.save,
-                "checkpoint_save": args.checkpoint_save,
-                "use_torch_compile": args.use_torch_compile,
-                "torch_compile_backend": args.torch_compile_backend,
-                "torch_compile_mode": args.torch_compile_mode,
-                "torch_compile_fullgraph": args.torch_compile_fullgraph,
-                "torch_compile_dynamic": args.torch_compile_dynamic,
-                "use_amp": args.use_amp,
-                "amp_dtype": args.amp_dtype,
-                "enable_tf32": args.enable_tf32,
-                "float32_matmul_precision": args.float32_matmul_precision,
-                "profile_timing": args.profile_timing,
-                "profile_warmup_batches": args.profile_warmup_batches,
-                "profile_num_batches": args.profile_num_batches,
-                "profile_log_every": args.profile_log_every,
-                "profile_cuda_sync": args.profile_cuda_sync,
-                "profile_dataloader_only_batches": args.profile_dataloader_only_batches,
-                "profile_dataloader_move_to_device": args.profile_dataloader_move_to_device,
-                "grad_clip_max_norm": args.grad_clip_max_norm,
-                "use_clr": args.use_clr,
-                "clr_base_lr": args.clr_base_lr,
-                "clr_max_lr": args.clr_max_lr,
-                "clr_scale_gamma": args.clr_scale_gamma,
-                "clr_scale_every_epochs": args.clr_scale_every_epochs,
-                "early_stopping_patience": args.early_stopping_patience,
-                "dropout_rate": args.dropout_rate,
-            }
-        )
-    else:
-        run = wandb.init(
-            entity="kall",
-            project="prosit_uncertainty_aware",
-            name=args.wandb_run_name,
-            # If additional config variables are uncommented under CONFIG add them here
-            config={
-                "learning_rate": args.lr,
-                "dataset":"PROSPECT",
-                "epochs":args.epochs,
-                "uncertainty_aware": args.uncertainty_aware, 
-                "batch_size": args.batch_size,
-                "max_seq_len": args.max_seq_len, 
-                "shuffle": args.shuffle,
-                "shuffle_buffer_size": args.shuffle_buffer_size,
-                "parquet_read_batch_size": args.parquet_read_batch_size,
-                "num_workers": args.num_workers,
-                "pin_memory": args.pin_memory,
-                "persistent_workers": args.persistent_workers,
-                "prefetch_factor": args.prefetch_factor,
-                "in_order": args.in_order,
-                "with_termini": args.with_termini,
-                "encoding_scheme": args.encoding_scheme,
-                "sequence_column": args.sequence_column,
-                "label_column": args.label_column,
-                "collision_energy_column": args.collision_energy_column,
-                "precursor_charge_column": args.precursor_charge_column,
-                "ptm_features": args.ptm_features,
-                "debug_unknown_tokens": args.debug_unknown_tokens,
-                "max_train_batches": args.max_train_batches,
-                "max_val_batches": args.max_val_batches,
-                "max_test_batches": args.max_test_batches,
-                "save": args.save,
-                "checkpoint_save": args.checkpoint_save,
-                "use_torch_compile": args.use_torch_compile,
-                "torch_compile_backend": args.torch_compile_backend,
-                "torch_compile_mode": args.torch_compile_mode,
-                "torch_compile_fullgraph": args.torch_compile_fullgraph,
-                "torch_compile_dynamic": args.torch_compile_dynamic,
-                "use_amp": args.use_amp,
-                "amp_dtype": args.amp_dtype,
-                "enable_tf32": args.enable_tf32,
-                "float32_matmul_precision": args.float32_matmul_precision,
-                "profile_timing": args.profile_timing,
-                "profile_warmup_batches": args.profile_warmup_batches,
-                "profile_num_batches": args.profile_num_batches,
-                "profile_log_every": args.profile_log_every,
-                "profile_cuda_sync": args.profile_cuda_sync,
-                "profile_dataloader_only_batches": args.profile_dataloader_only_batches,
-                "profile_dataloader_move_to_device": args.profile_dataloader_move_to_device,
-                "grad_clip_max_norm": args.grad_clip_max_norm,
-                "use_clr": args.use_clr,
-                "clr_base_lr": args.clr_base_lr,
-                "clr_max_lr": args.clr_max_lr,
-                "clr_scale_gamma": args.clr_scale_gamma,
-                "clr_scale_every_epochs": args.clr_scale_every_epochs,
-                "early_stopping_patience": args.early_stopping_patience,
-                "dropout_rate": args.dropout_rate,
-            }
-        )
+    run = wandb.init(
+        entity="kall",
+        project="prosit_uncertainty_aware",
+        name=args.wandb_run_name,
+        # If additional config variables are uncommented under CONFIG add them here
+        config={
+            "learning_rate": args.lr,
+            "dataset":"PROSPECT",
+            "epochs":args.epochs,
+            "uncertainty_aware": args.uncertainty_aware, 
+            "batch_size": args.batch_size,
+            "max_seq_len": args.max_seq_len, 
+            "shuffle": args.shuffle,
+            "shuffle_buffer_size": args.shuffle_buffer_size,
+            "parquet_read_batch_size": args.parquet_read_batch_size,
+            "num_workers": args.num_workers,
+            "pin_memory": args.pin_memory,
+            "persistent_workers": args.persistent_workers,
+            "prefetch_factor": args.prefetch_factor,
+            "in_order": args.in_order,
+            "with_termini": args.with_termini,
+            "encoding_scheme": args.encoding_scheme,
+            "sequence_column": args.sequence_column,
+            "label_column": args.label_column,
+            "collision_energy_column": args.collision_energy_column,
+            "precursor_charge_column": args.precursor_charge_column,
+            "ptm_features": args.ptm_features,
+            "debug_unknown_tokens": args.debug_unknown_tokens,
+            "max_train_batches": args.max_train_batches,
+            "max_val_batches": args.max_val_batches,
+            "max_test_batches": args.max_test_batches,
+            "save": args.save,
+            "checkpoint_save": args.checkpoint_save,
+            "use_torch_compile": args.use_torch_compile,
+            "torch_compile_backend": args.torch_compile_backend,
+            "torch_compile_mode": args.torch_compile_mode,
+            "torch_compile_fullgraph": args.torch_compile_fullgraph,
+            "torch_compile_dynamic": args.torch_compile_dynamic,
+            "use_amp": args.use_amp,
+            "amp_dtype": args.amp_dtype,
+            "enable_tf32": args.enable_tf32,
+            "float32_matmul_precision": args.float32_matmul_precision,
+            "profile_timing": args.profile_timing,
+            "profile_warmup_batches": args.profile_warmup_batches,
+            "profile_num_batches": args.profile_num_batches,
+            "profile_log_every": args.profile_log_every,
+            "profile_cuda_sync": args.profile_cuda_sync,
+            "profile_dataloader_only_batches": args.profile_dataloader_only_batches,
+            "profile_dataloader_move_to_device": args.profile_dataloader_move_to_device,
+            "grad_clip_max_norm": args.grad_clip_max_norm,
+            "use_clr": args.use_clr,
+            "clr_base_lr": args.clr_base_lr,
+            "clr_max_lr": args.clr_max_lr,
+            "clr_scale_gamma": args.clr_scale_gamma,
+            "clr_scale_every_epochs": args.clr_scale_every_epochs,
+            "early_stopping_patience": args.early_stopping_patience,
+            "dropout_rate": args.dropout_rate,
+        }
+    )
 
     _configure_wandb_axes()
 
@@ -1116,7 +1055,7 @@ def main() -> int:
                     _maybe_cuda_sync(device, profile_cuda_sync)
                     t_fwd_0 = time.perf_counter()
                 with _amp_autocast_context(device, amp_enabled, amp_dtype):
-                    pred_mean, pred_log_var, pred_missing_logit = model(batch)
+                    pred_log_mean, pred_log_var, pred_missing_logit = model(batch)
                     if do_profile:
                         _maybe_cuda_sync(device, profile_cuda_sync)
                         forward_s = time.perf_counter() - t_fwd_0
@@ -1153,14 +1092,14 @@ def main() -> int:
                     if do_profile:
                         _maybe_cuda_sync(device, profile_cuda_sync)
                         t_loss_0 = time.perf_counter()
-                    loss = gaussian_nll(batch[columns.label], pred_mean, pred_log_var, pred_missing_logit, batch[columns.sequence])
+                    loss = gaussian_nll(batch[columns.label], pred_log_mean, pred_log_var, pred_missing_logit, batch[columns.sequence])
                     _raise_for_nonfinite_loss(
                         loss,
                         epoch=epoch,
                         train_batches=train_batches,
                         batch=batch,
                         columns=columns,
-                        pred_mean=pred_mean,
+                        pred_log_mean=pred_log_mean,
                         pred_log_var=pred_log_var,
                         pred_missing_logit=pred_missing_logit,
                     )
@@ -1203,12 +1142,12 @@ def main() -> int:
                 train_batches += 1
                 train_it.set_postfix(loss=f"{loss.item():.4f}")
 
-                batch_mae = _mae_from_log_mean(batch[columns.label], pred_mean)
+                batch_mae = _mae_from_log_mean(batch[columns.label], pred_log_mean)
                 batch_msa = _spectral_angle_from_log_mean(
-                    batch[columns.label], pred_mean
+                    batch[columns.label], pred_log_mean
                 )
                 batch_variance_stats = _variance_diagnostics(
-                    batch[columns.label], pred_mean, pred_log_var, "train_batch"
+                    batch[columns.label], pred_log_mean, pred_log_var, "train_batch"
                 )
 
                 train_mae_total += batch_mae
@@ -1269,27 +1208,27 @@ def main() -> int:
                     batch = _move_batch_to_device(batch, device)
                     batch = _cast_batch_types(batch, columns)
                     with _amp_autocast_context(device, amp_enabled, amp_dtype):
-                        pred_mean, pred_log_var, pred_missing_logit = model(batch)
-                        val_loss = gaussian_nll(batch[columns.label], pred_mean, pred_log_var, pred_missing_logit, batch[columns.sequence])
+                        pred_log_mean, pred_log_var, pred_missing_logit = model(batch)
+                        val_loss = gaussian_nll(batch[columns.label], pred_log_mean, pred_log_var, pred_missing_logit, batch[columns.sequence])
                     _raise_for_nonfinite_loss(
                         val_loss,
                         epoch=epoch,
                         train_batches=val_batches,
                         batch=batch,
                         columns=columns,
-                        pred_mean=pred_mean,
+                        pred_log_mean=pred_log_mean,
                         pred_log_var=pred_log_var,
                         pred_missing_logit=pred_missing_logit,
                     )
                     val_loss_total += val_loss.item()
                     val_batches += 1
                     
-                    batch_mae = _mae_from_log_mean(batch[columns.label], pred_mean)
+                    batch_mae = _mae_from_log_mean(batch[columns.label], pred_log_mean)
                     batch_msa = _spectral_angle_from_log_mean(
-                        batch[columns.label], pred_mean
+                        batch[columns.label], pred_log_mean
                     )
                     batch_variance_stats = _variance_diagnostics(
-                        batch[columns.label], pred_mean, pred_log_var, "val_batch"
+                        batch[columns.label], pred_log_mean, pred_log_var, "val_batch"
                     )
 
                     val_mean_absolute_error_total += batch_mae
@@ -1677,8 +1616,8 @@ def main() -> int:
                     batch = _move_batch_to_device(batch, device)
                     batch = _cast_batch_types(batch, columns)
                     with _amp_autocast_context(device, amp_enabled, amp_dtype):
-                        pred_mean, pred_log_var, pred_missing_logit = model(batch)
-                        test_loss = gaussian_nll(batch[columns.label], pred_mean, pred_log_var, pred_missing_logit, batch[columns.sequence])
+                        pred_log_mean, pred_log_var, pred_missing_logit = model(batch)
+                        test_loss = gaussian_nll(batch[columns.label], pred_log_mean, pred_log_var, pred_missing_logit, batch[columns.sequence])
                     test_loss_total += test_loss.item()
                     test_batches += 1
                     test_it.set_postfix(loss=f"{test_loss.item():.4f}")

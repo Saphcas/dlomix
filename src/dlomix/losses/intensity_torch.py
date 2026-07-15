@@ -208,7 +208,7 @@ def _possible_fragment_mask(
 
 def gaussian_nll(
     y_true: torch.Tensor,
-    y_mean_pred: torch.Tensor,
+    y_log_mean_pred: torch.Tensor,
     y_log_var_pred: torch.Tensor,
     y_missingness_pred: torch.Tensor,
     encoded_sequence: torch.Tensor,
@@ -233,7 +233,7 @@ def gaussian_nll(
     ----------
     y_true : torch.Tensor
         A tensor containing the true values, with shape `(batch_size, num_values)`.
-    y_mean_pred : torch.Tensor
+    y_log_mean_pred : torch.Tensor
         A tensor containing predicted mean log-intensities, with the same shape
         as `y_true`.
     y_log_var_pred : torch.Tensor
@@ -263,7 +263,7 @@ def gaussian_nll(
     # fp32; tiny variances and log-intensity errors are exactly where reduced
     # precision can turn a large finite loss into inf/NaN.
     y_true = y_true.float()
-    y_mean_pred = y_mean_pred.float()
+    y_log_mean_pred = y_log_mean_pred.float()
     y_log_var_pred = y_log_var_pred.float()
     y_missingness_pred = y_missingness_pred.float()
 
@@ -297,7 +297,7 @@ def gaussian_nll(
         y_missingness_pred[valid], presence_target[valid], reduction="sum"
     )
 
-    if not torch.isfinite(y_mean_pred[valid]).all():
+    if not torch.isfinite(y_log_mean_pred[valid]).all():
         raise ValueError("Non-finite predicted log-intensity mean in valid fragments.")
     if not torch.isfinite(y_log_var_pred[valid]).all():
         raise ValueError("Non-finite predicted log variance in valid fragments.")
@@ -308,7 +308,7 @@ def gaussian_nll(
         # The Gaussian term in the derivation is over log(y_k + eps), not raw
         # intensity. Therefore the model's mean head is interpreted as mu_k in
         # log-intensity space, and the target passed to GaussianNLL is log y.
-        log_target = torch.log(y_true[present].to(dtype=y_mean_pred.dtype) + epsilon)
+        log_target = torch.log(y_true[present].to(dtype=y_log_mean_pred.dtype) + epsilon)
 
         # Use the standard log-variance parameterization s = log(sigma^2):
         #   GaussianNLL_k = 0.5 * (exp(-s_k) * (log_y_k - mu_k)^2
@@ -319,7 +319,7 @@ def gaussian_nll(
         # for the baseline experiment so out-of-range log variances still get
         # gradients from the likelihood instead of hitting clamp dead zones.
         log_var = y_log_var_pred[present]
-        squared_error = torch.square(log_target - y_mean_pred[present])
+        squared_error = torch.square(log_target - y_log_mean_pred[present])
         intensity_loss = 0.5 * (
             torch.exp(-log_var) * squared_error
             + log_var
@@ -332,7 +332,7 @@ def gaussian_nll(
         # This is not a data-repair guard: if all valid ions are observed as zero,
         # the derivation's sum over {k: y_k > 0} is an empty sum, i.e. zero. The
         # batch still trains through the Bernoulli absence terms above.
-        intensity_loss = y_mean_pred.sum() * 0.0
+        intensity_loss = y_log_mean_pred.sum() * 0.0
 
     total_loss = presence_loss + intensity_loss
     normalizer = valid.sum().to(dtype=total_loss.dtype)

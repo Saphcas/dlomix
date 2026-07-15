@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 #SBATCH -A NAISS2026-3-479-gpu -p gpu --gpus=1
 #SBATCH -t 42:00:00
-#SBATCH -J dlomix-ua-train
-#SBATCH --output /nobackup/proj/disk/kall/personal/$USER/logs/UA_training.out
+#SBATCH -J dlomix-msd-train
+#SBATCH --output /nobackup/proj/disk/kall/personal/$USER/logs/%x-%j.out
 
 scp -r /nobackup/proj/disk/kall/shared/datasets/Prosit_PTMs/PTMs_Train $TMPDIR
 
