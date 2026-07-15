@@ -2,7 +2,7 @@ Bootstrap: localimage
 From: /nobackup/proj/disk/kall/shared/containers/pytorch-ngc-26.06-py3.sif
 
 %files
-    apptainer/requirements-container.txt /requirements-container.txt
+    cluster_scripts/arrhenius/apptainer/requirements-container.txt /requirements-container.txt
     . /opt/dlomix-src
 
 %post

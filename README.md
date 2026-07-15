@@ -71,67 +71,6 @@ pip install dlomix[pytorch]     # PyTorch backend
 
 ```
 
-### Arrhenius Apptainer install
-
-On Arrhenius, use the NVIDIA PyTorch Apptainer image rather than installing
-PyTorch with pip or conda. The GPU partition is `aarch64`, and the shared base
-image already contains a CUDA-enabled PyTorch build validated for the GH200
-nodes.
-
-Do not build the container with `pip install -e .[dev]`: the `dev` extra pulls
-both TensorFlow and generic `torch`/`torchvision` wheels. The Apptainer recipe
-instead installs DLOmix's non-backend dependencies, then installs DLOmix with
-`--no-deps` so the NVIDIA PyTorch stack is preserved.
-
-Start a GPU shell:
-
-```bash
-interactive -A naiss2026-3-479-gpu -p gpu --gpus=1 -t 02:00:00
-```
-
-Load the GPU software environment and keep Apptainer cache/tmp files out of
-`$HOME`:
-
-```bash
-module purge
-module load GPU/buildenv-nvhpc/25.9-cu13.0
-
-export DLOMIX_PERSONAL=/nobackup/proj/disk/kall/personal/$USER
-export APPTAINER_CACHEDIR=$DLOMIX_PERSONAL/apptainer_cache
-export APPTAINER_TMPDIR=/tmp/$USER-apptainer
-unset SINGULARITY_CACHEDIR
-
-mkdir -p "$APPTAINER_CACHEDIR" "$APPTAINER_TMPDIR" "$DLOMIX_PERSONAL/containers"
-```
-
-Build the DLOmix image from the shared NVIDIA PyTorch base image:
-
-```bash
-cd "$DLOMIX_PERSONAL/repos/dlomix"
-apptainer build "$DLOMIX_PERSONAL/containers/dlomix-ngc-26.06.sif" apptainer/dlomix.def
-```
-
-Smoke-test CUDA and DLOmix:
-
-```bash
-apptainer exec --nv \
-  --bind "$DLOMIX_PERSONAL:$DLOMIX_PERSONAL" \
-  --bind /nobackup/proj/disk/kall/shared/datasets:/nobackup/proj/disk/kall/shared/datasets \
-  "$DLOMIX_PERSONAL/containers/dlomix-ngc-26.06.sif" \
-  python -c "import os, torch, dlomix; print(os.environ.get('DLOMIX_BACKEND')); print(torch.__version__); print(torch.cuda.is_available()); print(torch.cuda.get_device_name(0)); print(dlomix.__version__)"
-```
-
-Test selected PyTorch imports:
-
-```bash
-apptainer exec --nv \
-  --bind "$DLOMIX_PERSONAL:$DLOMIX_PERSONAL" \
-  --bind /nobackup/proj/disk/kall/shared/datasets:/nobackup/proj/disk/kall/shared/datasets \
-  "$DLOMIX_PERSONAL/containers/dlomix-ngc-26.06.sif" \
-  python -c "import dlomix; import dlomix.models.prosit_torch; import dlomix.data; print('dlomix torch imports ok')"
-```
-
-
 **General Package Overview**
 
 DLOmix provides a unified API across both TensorFlow and PyTorch backends:
@@ -181,6 +120,71 @@ DLOmix provides a unified API across both TensorFlow and PyTorch backends:
 To install dlomix, along with the tools needed to develop and run tests, run the following command in your virtualenv:
 ```bash
 $ pip install -e .[dev]
+```
+
+
+## Arrhenius Apptainer install
+
+On Arrhenius, use the NVIDIA PyTorch Apptainer image rather than installing
+PyTorch with pip or conda. The GPU partition is `aarch64`, and the shared base
+image already contains a CUDA-enabled PyTorch build validated for the GH200
+nodes.
+
+Arrhenius was used during PyTorch development of an uncertainty aware Prosit. 
+Therefore the Apptainer definition file and requirement file will only install
+required libraries for using PyTorch. Should you require TensorFlow, or other
+libraries that are not included, modify the requirement and definition files 
+under `cluster_scripts/arrhenius/apptainer/`. 
+
+The current Apptainer recipe installs DLOmix's non-backend dependencies, after 
+which DLOmix with `--no-deps` is installed so the NVIDIA PyTorch stack is preserved.
+
+Start a GPU shell:
+
+```bash
+interactive -A naiss2026-3-479-gpu -p gpu --gpus=1 -t 02:00:00
+```
+
+Load the GPU software environment and keep Apptainer cache/tmp files out of
+`$HOME`:
+
+```bash
+module purge
+module load GPU/buildenv-nvhpc/25.9-cu13.0
+
+export DLOMIX_PERSONAL=/nobackup/proj/disk/kall/personal/$USER
+export APPTAINER_CACHEDIR=$DLOMIX_PERSONAL/apptainer_cache
+export APPTAINER_TMPDIR=/tmp/$USER-apptainer
+unset SINGULARITY_CACHEDIR
+
+mkdir -p "$APPTAINER_CACHEDIR" "$APPTAINER_TMPDIR" "$DLOMIX_PERSONAL/containers"
+```
+
+Build the DLOmix image from the shared NVIDIA PyTorch base image:
+
+```bash
+cd "$DLOMIX_PERSONAL/repos/dlomix"
+apptainer build "$DLOMIX_PERSONAL/containers/dlomix-ngc-26.06.sif" cluster_scripts/arrhenius/apptainer/dlomix.def
+```
+
+Smoke-test CUDA and DLOmix:
+
+```bash
+apptainer exec --nv \
+  --bind "$DLOMIX_PERSONAL:$DLOMIX_PERSONAL" \
+  --bind /nobackup/proj/disk/kall/shared/datasets:/nobackup/proj/disk/kall/shared/datasets \
+  "$DLOMIX_PERSONAL/containers/dlomix-ngc-26.06.sif" \
+  python -c "import os, torch, dlomix; print(os.environ.get('DLOMIX_BACKEND')); print(torch.__version__); print(torch.cuda.is_available()); print(torch.cuda.get_device_name(0)); print(dlomix.__version__)"
+```
+
+Test selected PyTorch imports:
+
+```bash
+apptainer exec --nv \
+  --bind "$DLOMIX_PERSONAL:$DLOMIX_PERSONAL" \
+  --bind /nobackup/proj/disk/kall/shared/datasets:/nobackup/proj/disk/kall/shared/datasets \
+  "$DLOMIX_PERSONAL/containers/dlomix-ngc-26.06.sif" \
+  python -c "import dlomix; import dlomix.models.prosit_torch; import dlomix.data; print('dlomix torch imports ok')"
 ```
 
 

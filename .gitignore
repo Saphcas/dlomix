@@ -2,7 +2,6 @@
 .vscode/
 
 # Ignore local files
-alvis/
 storage/
 nn_learning/
 

@@ -1,0 +1,40 @@
+# Used for apptainer image generation
+Bootstrap: docker
+From: continuumio/miniconda3:latest
+
+%post
+    # Clone the dlomix fork
+    git clone https://github.com/Saphcas/dlomix.git /opt/dlomix
+
+    # Source conda initialization and activate environment
+    conda init
+    . /opt/conda/etc/profile.d/conda.sh
+
+    # Pathing to apptainer env
+    echo ". /opt/conda/etc/profile.d/conda.sh" >> $APPTAINER_ENVIRONMENT
+    echo "conda activate dlomix_env" >> $APPTAINER_ENVIRONMENT
+
+    # Setup empty conda environment
+    conda create -n dlomix_env python=3.11 # -p ./opt/conda/envs/
+
+    conda activate dlomix_env
+    echo $CONDA_PREFIX
+
+    # Install dev branch of dlomix
+    python -m pip install -e /opt/dlomix[dev]
+    python -m pip install wandb
+
+    conda clean -afy
+
+%environment
+    # Activate pytorch backend
+    export DLOMIX_BACKEND=pytorch
+
+    # Fix pathing
+    export PATH=/opt/conda/envs/dlomix_env/bin:$PATH
+    export PYTHONPATH=/opt/dlomix:$PYTHONPATH
+
+%runscript
+    # Run the streaming train script
+    python /opt/dlomix/run_scripts/train_prosit_intensity_ptms_torch.py
+    # OR "here" ./dlomix/run_scripts/train_prosit_intensity_ptms_torch.py
