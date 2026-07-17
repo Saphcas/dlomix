@@ -6,16 +6,14 @@
 
 scp -r /nobackup/proj/disk/kall/shared/datasets/Prosit_PTMs/PTMs_Train $TMPDIR
 
-mkdir $TMPDIR/ua_checkpoints
-
 export HF_HOME=$TMPDIR/.hf
 export HF_HUB_CACHE=$TMPDIR/.hf/hub
 export HF_DATASETS_CACHE=$TMPDIR/.hf/datasets
 export TRANSFORMERS_CACHE=$TMPDIR/.hf/transformers
 
 export DATA_LOCATION=$TMPDIR/PTMs_Train
-export CHECKPOINT_DIR=$TMPDIR/ua_checkpoints
-export WANDB_NAME=uncertainty-aware
+export CHECKPOINT_DIR=$TMPDIR/"$SLURM_JOB_NAME"_"$SLURM_JOB_ID"_checkpoints
+export WANDB_NAME="$SLURM_JOB_NAME"_"$SLURM_JOB_ID"
 
 export USE_CLR=True
 export LEARNING_RATE=2e-4
@@ -25,6 +23,34 @@ export N_EPOCHS=120
 export DLOMIX_BACKEND=pytorch
 export UNCERTAINTY_AWARE=True
 
-apptainer exec --bind $TMPDIR/ /nobackup/proj/disk/kall/personal/$USER/containers/dlomix-ngc-26.06.sif python /opt/dlomix/run_scripts/train_prosit_intensity_ptms_torch.py
+mkdir $CHECKPOINT_DIR
 
-scp -r $TMPDIR/ua_checkpoints /nobackup/proj/disk/kall/personal/$USER/checkpoints/
+PERSISTENT_DIR=/nobackup/proj/disk/kall/personal/$USER/checkpoints/
+
+sync_back() {
+    echo "[sync] $(date) copying $CHECKPOINT_DIR -> $PERSISTENT_DIR"
+    scp -r $CHECKPOINT_DIR $PERSISTENT_DIR
+}
+
+cleanup() {
+    status=$?
+    echo "[cleanup] exit status: $status"
+    sync_back || echo "[cleanup] WARNING: scp failed"
+    exit "$status"
+}
+
+on_term() {
+    echo "[signal] caught SIGTERM, syncing before exit"
+    sync_back || true
+    exit 143
+}
+
+trap cleanup EXIT
+trap on_term TERM
+trap 'echo "[signal] caught SIGINT"; exit 130' INT
+
+apptainer exec --bind $TMPDIR/ \
+    /nobackup/proj/disk/kall/personal/$USER/containers/dlomix-ngc-26.06.sif \
+    python /opt/dlomix/run_scripts/train_prosit_intensity_ptms_torch.py
+
+# scp -r $CHECKPOINT_DIR /nobackup/proj/disk/kall/personal/$USER/checkpoints/
