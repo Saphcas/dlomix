@@ -501,14 +501,7 @@ def _target_intensity_for_metrics(y_true: torch.Tensor) -> torch.Tensor:
 def _mae_from_log_mean(y_true: torch.Tensor, pred_log_mean: torch.Tensor) -> float:
     pred_intensity = _log_mean_to_intensity(pred_log_mean)
     target = _target_intensity_for_metrics(y_true)
-    # Testing if torch conversion is causing peaks in mae. Instead of using item turn float output to string
-    string_number = str(torch.mean(torch.abs(pred_intensity - target)).float())
-    # number will be between ( and ,
-    start = string_number.find("(") + 1
-    end = string_number.find(",")
-    string_number = string_number[start:end]
-    mean_string_to_float = eval(string_number)
-    return mean_string_to_float #torch.mean(torch.abs(pred_intensity - target)).float().item()
+    return torch.mean(torch.abs(pred_intensity - target)).item()
 
 
 def _spectral_angle_from_log_mean(y_true: torch.Tensor, pred_log_mean: torch.Tensor) -> float:
