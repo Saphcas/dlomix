@@ -2,7 +2,7 @@
 #SBATCH -A naiss2026-3-479-gpu -p gpu --gpus=1
 #SBATCH -t 42:00:00
 #SBATCH --signal=B:TERM@120
-#SBATCH -J dlomix-ua-train
+#SBATCH -J dlomix-ua-learning-rate
 #SBATCH -o /nobackup/proj/disk/kall/personal/%u/logs/%x-%j.out
 
 set -Eeuo pipefail
@@ -19,15 +19,15 @@ export TRANSFORMERS_CACHE=$TMPDIR/.hf/transformers
 
 export DATA_LOCATION=$TMPDIR/PTMs_Train
 export CHECKPOINT_DIR=$TMPDIR/"$SLURM_JOB_NAME"_"$SLURM_JOB_ID"_checkpoints
-export WANDB_NAME="$SLURM_JOB_NAME"_"$SLURM_JOB_ID"
+export WANDB_NAME="$SLURM_JOB_NAME"_"$SLURM_JOB_ID"_5e-4
 
-export USE_CLR=True
-export LEARNING_RATE=2e-4
+export USE_CLR=False
+export LEARNING_RATE=5e-4
 export NUM_WORKERS=16
 export BATCH_SIZE=1024
 export N_EPOCHS=120
 export DLOMIX_BACKEND=pytorch
-export UNCERTAINTY_AWARE=False
+export UNCERTAINTY_AWARE=True
 
 mkdir -p $CHECKPOINT_DIR
 
