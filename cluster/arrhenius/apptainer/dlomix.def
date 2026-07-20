@@ -7,34 +7,16 @@ From: /nobackup/proj/disk/kall/shared/containers/pytorch-ngc-26.06-py3.sif
 
 %post
     set -eu
-
-    # Source conda initialization and activate environment
-    conda init
-    . /opt/conda/etc/profile.d/conda.sh
-
-    # Pathing to apptainer env
-    echo ". /opt/conda/etc/profile.d/conda.sh" >> $APPTAINER_ENVIRONMENT
-    echo "conda activate dlomix_env" >> $APPTAINER_ENVIRONMENT
-
-    # Setup empty conda environment
-    conda create -n dlomix_env python=3.11 # -p ./opt/conda/envs/
-
-    conda activate dlomix_env
-    echo $CONDA_PREFIX
-
     python -m pip install --no-cache-dir --root-user-action=ignore --upgrade pip
     python -m pip install --no-cache-dir --root-user-action=ignore -r /requirements-container.txt
     python -m pip install --no-cache-dir --root-user-action=ignore --no-deps /opt/dlomix-src
     rm -f /requirements-container.txt
-
-    conda clean -afy
 
 %environment
     export PYTHONUNBUFFERED=1
     export DLOMIX_BACKEND=pytorch
 
     # Fix pathing
-    export PATH=/opt/conda/envs/dlomix_env/bin:$PATH
     export PYTHONPATH=/opt/dlomix:$PYTHONPATH
 %runscript
     # Run the streaming train script
