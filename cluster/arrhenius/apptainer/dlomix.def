@@ -3,7 +3,7 @@ From: /nobackup/proj/disk/kall/shared/containers/pytorch-ngc-26.06-py3.sif
 
 %files
     cluster/arrhenius/apptainer/requirements-container.txt /requirements-container.txt
-    . /opt/dlomix
+    . /opt/dlomix-src
 
 %post
     set -eu
@@ -17,7 +17,7 @@ From: /nobackup/proj/disk/kall/shared/containers/pytorch-ngc-26.06-py3.sif
     export DLOMIX_BACKEND=pytorch
 
     # Fix pathing
-    export PYTHONPATH=/opt/dlomix:$PYTHONPATH
+    export PYTHONPATH=/opt/dlomix-src:$PYTHONPATH
 %runscript
     # Run the streaming train script
-    python /opt/dlomix/run_scripts/train_prosit_intensity_ptms_torch.py    
+    python /opt/dlomix-src/run_scripts/train_prosit_intensity_ptms_torch.py    
