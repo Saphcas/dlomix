@@ -164,7 +164,7 @@ Build the DLOmix image from the shared NVIDIA PyTorch base image:
 
 ```bash
 cd "$DLOMIX_PERSONAL/repos/dlomix"
-apptainer build "$DLOMIX_PERSONAL/containers/dlomix-ngc-26.06.sif" cluster_scripts/arrhenius/apptainer/dlomix.def
+apptainer build "$DLOMIX_PERSONAL/containers/dlomix-ngc-26.06.sif" cluster/arrhenius/apptainer/dlomix.def
 ```
 
 Smoke-test CUDA and DLOmix:
