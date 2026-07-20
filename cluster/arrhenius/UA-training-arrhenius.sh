@@ -19,7 +19,7 @@ export TRANSFORMERS_CACHE=$TMPDIR/.hf/transformers
 
 export DATA_LOCATION=$TMPDIR/PTMs_Train
 export CHECKPOINT_DIR=$TMPDIR/"$SLURM_JOB_NAME"_"$SLURM_JOB_ID"_checkpoints
-export WANDB_NAME=arrhenius-test-1  #"$SLURM_JOB_NAME"_"$SLURM_JOB_ID"
+export WANDB_NAME="$SLURM_JOB_NAME"_"$SLURM_JOB_ID"
 
 export USE_CLR=True
 export LEARNING_RATE=2e-4
