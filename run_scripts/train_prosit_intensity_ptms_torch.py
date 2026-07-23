@@ -484,28 +484,54 @@ def _cast_batch_types(batch: dict, columns: ColumnConfig) -> dict:
     return batch
 
 
-def _log_mean_to_intensity(pred_log_mean: torch.Tensor, epsilon: float = 1e-7) -> torch.Tensor:
+def _log_mean_to_intensity(
+    pred_log_mean: torch.Tensor,
+    pred_presence_logit: torch.Tensor | None = None,
+    epsilon: float = 1e-7,
+) -> torch.Tensor:
     # The uncertainty-aware mean head predicts mu in log-intensity space.
-    # Metrics such as MAE and spectral angle operate on raw nonnegative
-    # intensities, so convert exp(mu) - eps. Clamp only to avoid metric-side
-    # overflow if a bad run emits very large positive log means.
-    return torch.clamp(torch.exp(torch.clamp(pred_log_mean.detach().float(), max=20.0)) - epsilon, min=0.0)
+    # Metrics operate on raw nonnegative intensities, so convert exp(mu) - eps.
+    # Clamp only to avoid metric-side overflow if a bad run emits very large
+    # positive log means; the loss itself remains unclamped.
+    pred_intensity = torch.clamp(
+        torch.exp(torch.clamp(pred_log_mean.detach().float(), max=20.0)) - epsilon,
+        min=0.0,
+    )
+    if pred_presence_logit is None:
+        return pred_intensity
+
+    # Use the zero-inflated model's expected observed-intensity proxy for
+    # monitoring metrics: conditional lognormal median times P(present).
+    presence_probability = torch.sigmoid(pred_presence_logit.detach().float())
+    return pred_intensity * presence_probability
 
 
-def _target_intensity_for_metrics(y_true: torch.Tensor) -> torch.Tensor:
-    target = y_true.detach().float().clone()
-    target[target < 0] = 0
-    return target
+def _target_intensity_and_valid_mask_for_metrics(
+    y_true: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    target = y_true.detach().float()
+    valid = target >= 0
+    return target, valid
 
 
-def _mae_from_log_mean(y_true: torch.Tensor, pred_log_mean: torch.Tensor) -> float:
-    pred_intensity = _log_mean_to_intensity(pred_log_mean)
-    target = _target_intensity_for_metrics(y_true)
-    return torch.mean(torch.abs(pred_intensity - target)).item()
+def _mae_from_log_mean(
+    y_true: torch.Tensor,
+    pred_log_mean: torch.Tensor,
+    pred_presence_logit: torch.Tensor | None = None,
+) -> float:
+    pred_intensity = _log_mean_to_intensity(pred_log_mean, pred_presence_logit)
+    target, valid = _target_intensity_and_valid_mask_for_metrics(y_true)
+    if not torch.any(valid):
+        return 0.0
+    return torch.mean(torch.abs(pred_intensity[valid] - target[valid])).item()
 
 
-def _spectral_angle_from_log_mean(y_true: torch.Tensor, pred_log_mean: torch.Tensor) -> float:
-    pred_intensity = _log_mean_to_intensity(pred_log_mean)
+def _spectral_angle_from_log_mean(
+    y_true: torch.Tensor,
+    pred_log_mean: torch.Tensor,
+    pred_presence_logit: torch.Tensor | None = None,
+) -> float:
+    pred_intensity = _log_mean_to_intensity(pred_log_mean, pred_presence_logit)
     return 1.0 - masked_spectral_distance(y_true.detach().float(), pred_intensity).item()
 
 
@@ -1142,9 +1168,11 @@ def main() -> int:
                 train_batches += 1
                 train_it.set_postfix(loss=f"{loss.item():.4f}")
 
-                batch_mae = _mae_from_log_mean(batch[columns.label], pred_log_mean)
+                batch_mae = _mae_from_log_mean(
+                    batch[columns.label], pred_log_mean, pred_missing_logit
+                )
                 batch_msa = _spectral_angle_from_log_mean(
-                    batch[columns.label], pred_log_mean
+                    batch[columns.label], pred_log_mean, pred_missing_logit
                 )
                 batch_variance_stats = _variance_diagnostics(
                     batch[columns.label], pred_log_mean, pred_log_var, "train_batch"
@@ -1223,9 +1251,11 @@ def main() -> int:
                     val_loss_total += val_loss.item()
                     val_batches += 1
                     
-                    batch_mae = _mae_from_log_mean(batch[columns.label], pred_log_mean)
+                    batch_mae = _mae_from_log_mean(
+                        batch[columns.label], pred_log_mean, pred_missing_logit
+                    )
                     batch_msa = _spectral_angle_from_log_mean(
-                        batch[columns.label], pred_log_mean
+                        batch[columns.label], pred_log_mean, pred_missing_logit
                     )
                     batch_variance_stats = _variance_diagnostics(
                         batch[columns.label], pred_log_mean, pred_log_var, "val_batch"
