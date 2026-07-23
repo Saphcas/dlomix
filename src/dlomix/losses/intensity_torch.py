@@ -210,7 +210,7 @@ def gaussian_nll(
     y_true: torch.Tensor,
     y_log_mean_pred: torch.Tensor,
     y_log_var_pred: torch.Tensor,
-    y_missingness_pred: torch.Tensor,
+    y_presence_pred: torch.Tensor,
     encoded_sequence: torch.Tensor,
     fragments_per_cleavage=None,
     has_termini: bool = True,
@@ -239,9 +239,9 @@ def gaussian_nll(
     y_log_var_pred : torch.Tensor
         A tensor containing predicted log variances, with the same shape as
         `y_true`.
-    y_missingness_pred : torch.Tensor
+    y_presence_pred : torch.Tensor
         A tensor containing predicted presence logits, with the same shape as
-        `y_true`. The legacy argument name is kept to avoid changing callers.
+        `y_true`.
     encoded_sequence : torch.Tensor
         Tensor containing the number encoded sequence. Shape is equal to
         `(batch_size, max_seq_len)`.
@@ -265,7 +265,7 @@ def gaussian_nll(
     y_true = y_true.float()
     y_log_mean_pred = y_log_mean_pred.float()
     y_log_var_pred = y_log_var_pred.float()
-    y_missingness_pred = y_missingness_pred.float()
+    y_presence_pred = y_presence_pred.float()
 
     # possible: positions that can exist for each peptide length.
     # y_true >= 0: remove -1 sentinels for impossible/unannotated ions. Combining
@@ -292,16 +292,16 @@ def gaussian_nll(
     #   -log p_k for y_k > 0, and -log(1 - p_k) for y_k = 0.
     # We use reduction="sum" first so the final normalization is controlled by
     # the same valid-fragment count as the full mixture loss.
-    presence_target = present.to(dtype=y_missingness_pred.dtype)
+    presence_target = present.to(dtype=y_presence_pred.dtype)
     presence_loss = F.binary_cross_entropy_with_logits(
-        y_missingness_pred[valid], presence_target[valid], reduction="sum"
+        y_presence_pred[valid], presence_target[valid], reduction="sum"
     )
 
     if not torch.isfinite(y_log_mean_pred[valid]).all():
         raise ValueError("Non-finite predicted log-intensity mean in valid fragments.")
     if not torch.isfinite(y_log_var_pred[valid]).all():
         raise ValueError("Non-finite predicted log variance in valid fragments.")
-    if not torch.isfinite(y_missingness_pred[valid]).all():
+    if not torch.isfinite(y_presence_pred[valid]).all():
         raise ValueError("Non-finite predicted presence logits in valid fragments.")
 
     if torch.any(present):

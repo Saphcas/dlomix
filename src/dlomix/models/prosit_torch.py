@@ -430,9 +430,9 @@ class PrositIntensityUncertaintyPredictor(nn.Module):
         if self.meta_data_keys:
             self.meta_data_fusion_layer = MetaDataFusionBlock(max_ion=self.max_ion)
 
-        self.mean_regressor = self._make_parameter_head()
+        self.log_mean_regressor = self._make_parameter_head()
         self.log_var_regressor = self._make_parameter_head()
-        self.missingness_regressor = self._make_parameter_head()
+        self.presence_regressor = self._make_parameter_head()
 
     def _make_parameter_head(self):
         return nn.Sequential(
@@ -445,7 +445,7 @@ class PrositIntensityUncertaintyPredictor(nn.Module):
                     ("activation", nn.LeakyReLU()),
                     ("regressor_dropout", nn.Dropout(self.latent_dropout_rate)),
                     # Final projection is intentionally linear. The three heads
-                    # output Gaussian means, log variances, and Bernoulli logits.
+                    # output Gaussian log means, log variances, and Bernoulli logits.
                     (
                         "output_dense",
                         nn.Linear(self.regressor_layer_size, self.len_fion),
@@ -570,10 +570,10 @@ class PrositIntensityUncertaintyPredictor(nn.Module):
 
         x = self.decoder(x)
 
-        x_mean = self.mean_regressor(x)
+        x_log_mean = self.log_mean_regressor(x)
         x_log_var = self.log_var_regressor(x)
-        x_missingness = self.missingness_regressor(x)
-        x = x_mean, x_log_var, x_missingness
+        x_presence = self.presence_regressor(x)
+        x = x_log_mean, x_log_var, x_presence
 
         return x
 

@@ -601,7 +601,7 @@ def _raise_for_nonfinite_loss(
     columns: ColumnConfig,
     pred_log_mean: torch.Tensor,
     pred_log_var: torch.Tensor,
-    pred_missing_logit: torch.Tensor,
+    pred_presence_logit: torch.Tensor,
 ) -> None:
     if torch.isfinite(loss):
         return
@@ -615,7 +615,7 @@ def _raise_for_nonfinite_loss(
         _tensor_summary("y_true", y_true),
         _tensor_summary("pred_log_mean", pred_log_mean),
         _tensor_summary("pred_log_var", pred_log_var),
-        _tensor_summary("pred_presence_logit", pred_missing_logit),
+        _tensor_summary("pred_presence_logit", pred_presence_logit),
     ]
     raise FloatingPointError("\n".join(msg))
 
@@ -1081,7 +1081,7 @@ def main() -> int:
                     _maybe_cuda_sync(device, profile_cuda_sync)
                     t_fwd_0 = time.perf_counter()
                 with _amp_autocast_context(device, amp_enabled, amp_dtype):
-                    pred_log_mean, pred_log_var, pred_missing_logit = model(batch)
+                    pred_log_mean, pred_log_var, pred_presence_logit = model(batch)
                     if do_profile:
                         _maybe_cuda_sync(device, profile_cuda_sync)
                         forward_s = time.perf_counter() - t_fwd_0
@@ -1118,7 +1118,7 @@ def main() -> int:
                     if do_profile:
                         _maybe_cuda_sync(device, profile_cuda_sync)
                         t_loss_0 = time.perf_counter()
-                    loss = gaussian_nll(batch[columns.label], pred_log_mean, pred_log_var, pred_missing_logit, batch[columns.sequence])
+                    loss = gaussian_nll(batch[columns.label], pred_log_mean, pred_log_var, pred_presence_logit, batch[columns.sequence])
                     _raise_for_nonfinite_loss(
                         loss,
                         epoch=epoch,
@@ -1127,7 +1127,7 @@ def main() -> int:
                         columns=columns,
                         pred_log_mean=pred_log_mean,
                         pred_log_var=pred_log_var,
-                        pred_missing_logit=pred_missing_logit,
+                        pred_presence_logit=pred_presence_logit,
                     )
                     if do_profile:
                         _maybe_cuda_sync(device, profile_cuda_sync)
@@ -1169,10 +1169,10 @@ def main() -> int:
                 train_it.set_postfix(loss=f"{loss.item():.4f}")
 
                 batch_mae = _mae_from_log_mean(
-                    batch[columns.label], pred_log_mean, pred_missing_logit
+                    batch[columns.label], pred_log_mean, pred_presence_logit
                 )
                 batch_msa = _spectral_angle_from_log_mean(
-                    batch[columns.label], pred_log_mean, pred_missing_logit
+                    batch[columns.label], pred_log_mean, pred_presence_logit
                 )
                 batch_variance_stats = _variance_diagnostics(
                     batch[columns.label], pred_log_mean, pred_log_var, "train_batch"
@@ -1236,8 +1236,8 @@ def main() -> int:
                     batch = _move_batch_to_device(batch, device)
                     batch = _cast_batch_types(batch, columns)
                     with _amp_autocast_context(device, amp_enabled, amp_dtype):
-                        pred_log_mean, pred_log_var, pred_missing_logit = model(batch)
-                        val_loss = gaussian_nll(batch[columns.label], pred_log_mean, pred_log_var, pred_missing_logit, batch[columns.sequence])
+                        pred_log_mean, pred_log_var, pred_presence_logit = model(batch)
+                        val_loss = gaussian_nll(batch[columns.label], pred_log_mean, pred_log_var, pred_presence_logit, batch[columns.sequence])
                     _raise_for_nonfinite_loss(
                         val_loss,
                         epoch=epoch,
@@ -1246,16 +1246,16 @@ def main() -> int:
                         columns=columns,
                         pred_log_mean=pred_log_mean,
                         pred_log_var=pred_log_var,
-                        pred_missing_logit=pred_missing_logit,
+                        pred_presence_logit=pred_presence_logit,
                     )
                     val_loss_total += val_loss.item()
                     val_batches += 1
                     
                     batch_mae = _mae_from_log_mean(
-                        batch[columns.label], pred_log_mean, pred_missing_logit
+                        batch[columns.label], pred_log_mean, pred_presence_logit
                     )
                     batch_msa = _spectral_angle_from_log_mean(
-                        batch[columns.label], pred_log_mean, pred_missing_logit
+                        batch[columns.label], pred_log_mean, pred_presence_logit
                     )
                     batch_variance_stats = _variance_diagnostics(
                         batch[columns.label], pred_log_mean, pred_log_var, "val_batch"
@@ -1646,8 +1646,8 @@ def main() -> int:
                     batch = _move_batch_to_device(batch, device)
                     batch = _cast_batch_types(batch, columns)
                     with _amp_autocast_context(device, amp_enabled, amp_dtype):
-                        pred_log_mean, pred_log_var, pred_missing_logit = model(batch)
-                        test_loss = gaussian_nll(batch[columns.label], pred_log_mean, pred_log_var, pred_missing_logit, batch[columns.sequence])
+                        pred_log_mean, pred_log_var, pred_presence_logit = model(batch)
+                        test_loss = gaussian_nll(batch[columns.label], pred_log_mean, pred_log_var, pred_presence_logit, batch[columns.sequence])
                     test_loss_total += test_loss.item()
                     test_batches += 1
                     test_it.set_postfix(loss=f"{test_loss.item():.4f}")
