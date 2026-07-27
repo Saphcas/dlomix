@@ -826,6 +826,8 @@ def main() -> int:
             "clr_scale_every_epochs": args.clr_scale_every_epochs,
             "early_stopping_patience": args.early_stopping_patience,
             "dropout_rate": args.dropout_rate,
+            "bce_weight": args.bce_weight,
+            "nll_weight": args.nll_weight,
         }
     )
 
