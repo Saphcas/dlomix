@@ -765,6 +765,7 @@ def main() -> int:
 
     device = _device_from_torch()
     print(f"Using device: {device}")
+    print(f"Using weights: BCE = {args.bce_weight}, NLL = {args.nll_weight}")
 
     if args.checkpoint_save:
         os.makedirs(args.checkpoint_save, exist_ok=True)
