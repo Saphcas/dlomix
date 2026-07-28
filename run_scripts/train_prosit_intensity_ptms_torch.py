@@ -182,6 +182,7 @@ CONFIG = {
     # --- PROSIT-PTM architecture notes (paper hyperparameters; informational) ---
     # "ptm_mlp_units": (1024, 64, 16),  # according to (2) PROSIT-PTM (PTM feature MLP sizes)
     # "decoder_dropout_rate": 0.5,  # according to (2) PROSIT-PTM (decoder dropout differs from encoder dropout)
+    "wandb_run_name": os.environ.get(str("WANDB_NAME")),
     "bce_weight": float(os.environ.get("BCE_WEIGHT", 1)),
     "nll_weight": float(os.environ.get("NLL_WEIGHT", 1)),
 }

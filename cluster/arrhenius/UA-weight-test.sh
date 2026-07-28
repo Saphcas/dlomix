@@ -7,7 +7,7 @@ export TRANSFORMERS_CACHE=$TMPDIR/.hf/transformers
 
 export DATA_LOCATION=$TMPDIR/PTMs_Train
 #export CHECKPOINT_DIR=$TMPDIR/"$SLURM_JOB_NAME"_"$SLURM_JOB_ID"_checkpoints
-export WANDB_NAME=weight_test
+export WANDB_NAME=weight-test
 
 export NUM_WORKERS=16
 export BATCH_SIZE=1024
