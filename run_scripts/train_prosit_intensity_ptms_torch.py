@@ -182,7 +182,8 @@ CONFIG = {
     # --- PROSIT-PTM architecture notes (paper hyperparameters; informational) ---
     # "ptm_mlp_units": (1024, 64, 16),  # according to (2) PROSIT-PTM (PTM feature MLP sizes)
     # "decoder_dropout_rate": 0.5,  # according to (2) PROSIT-PTM (decoder dropout differs from encoder dropout)
-    "wandb_run_name": os.environ.get(str("WANDB_NAME")),
+    "bce_weight": float(os.environ.get("BCE_WEIGHT", 1)),
+    "nll_weight": float(os.environ.get("NLL_WEIGHT", 1)),
 }
 
 
@@ -1120,7 +1121,7 @@ def main() -> int:
                     if do_profile:
                         _maybe_cuda_sync(device, profile_cuda_sync)
                         t_loss_0 = time.perf_counter()
-                    loss = gaussian_nll(batch[columns.label], pred_log_mean, pred_log_var, pred_presence_logit, batch[columns.sequence])
+                    loss = gaussian_nll(batch[columns.label], pred_log_mean, pred_log_var, pred_presence_logit, batch[columns.sequence], args.bce_weight, args.nll_weight)
                     _raise_for_nonfinite_loss(
                         loss,
                         epoch=epoch,
@@ -1239,7 +1240,7 @@ def main() -> int:
                     batch = _cast_batch_types(batch, columns)
                     with _amp_autocast_context(device, amp_enabled, amp_dtype):
                         pred_log_mean, pred_log_var, pred_presence_logit = model(batch)
-                        val_loss = gaussian_nll(batch[columns.label], pred_log_mean, pred_log_var, pred_presence_logit, batch[columns.sequence])
+                        val_loss = gaussian_nll(batch[columns.label], pred_log_mean, pred_log_var, pred_presence_logit, batch[columns.sequence], args.bce_weight, args.nll_weight)
                     _raise_for_nonfinite_loss(
                         val_loss,
                         epoch=epoch,
@@ -1649,7 +1650,7 @@ def main() -> int:
                     batch = _cast_batch_types(batch, columns)
                     with _amp_autocast_context(device, amp_enabled, amp_dtype):
                         pred_log_mean, pred_log_var, pred_presence_logit = model(batch)
-                        test_loss = gaussian_nll(batch[columns.label], pred_log_mean, pred_log_var, pred_presence_logit, batch[columns.sequence])
+                        test_loss = gaussian_nll(batch[columns.label], pred_log_mean, pred_log_var, pred_presence_logit, batch[columns.sequence], args.bce_weight, args.nll_weight)
                     test_loss_total += test_loss.item()
                     test_batches += 1
                     test_it.set_postfix(loss=f"{test_loss.item():.4f}")
