@@ -6,7 +6,6 @@ export HF_DATASETS_CACHE=$TMPDIR/.hf/datasets
 export TRANSFORMERS_CACHE=$TMPDIR/.hf/transformers
 
 export DATA_LOCATION=$TMPDIR/PTMs_Train
-#export CHECKPOINT_DIR=$TMPDIR/"$SLURM_JOB_NAME"_"$SLURM_JOB_ID"_checkpoints
 export WANDB_NAME=weight-test
 
 export NUM_WORKERS=16
@@ -17,8 +16,6 @@ export UNCERTAINTY_AWARE=True
 
 export BCE_WEIGHT=0.5
 export NLL_WEIGHT=1.5
-
-mkdir -p $CHECKPOINT_DIR
 
 PERSISTENT_DIR=/nobackup/proj/disk/kall/personal/$USER/checkpoints/
 
