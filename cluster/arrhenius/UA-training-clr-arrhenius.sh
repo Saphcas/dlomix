@@ -2,7 +2,7 @@
 #SBATCH -A naiss2026-3-479-gpu -p gpu --gpus=1
 #SBATCH -t 42:00:00
 #SBATCH --signal=B:TERM@120
-#SBATCH -J dlomix-msd-train
+#SBATCH -J dlomix-ua-train
 #SBATCH -o /nobackup/proj/disk/kall/personal/%u/logs/%x-%j.out
 
 set -Eeuo pipefail
@@ -17,11 +17,19 @@ export HF_HUB_CACHE=$TMPDIR/.hf/hub
 export HF_DATASETS_CACHE=$TMPDIR/.hf/datasets
 export TRANSFORMERS_CACHE=$TMPDIR/.hf/transformers
 
+export LR_SCHEDULE=clr
+
+export USE_CLR=True
+export CLR_BASE_LR=1e-5
+export CLR_MAX_LR=4e-4
+
+export LEARNING_RATE=2e-4
+
 export NUM_WORKERS=16
 export BATCH_SIZE=1024
 export N_EPOCHS=120
 export DLOMIX_BACKEND=pytorch
-export UNCERTAINTY_AWARE=False
+export UNCERTAINTY_AWARE=True
 
 export DATA_LOCATION=$TMPDIR/PTMs_Train
 export CHECKPOINT_DIR=$TMPDIR/"$SLURM_JOB_NAME"_"$SLURM_JOB_ID"_checkpoints

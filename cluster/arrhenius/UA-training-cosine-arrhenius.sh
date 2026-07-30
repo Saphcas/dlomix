@@ -17,17 +17,21 @@ export HF_HUB_CACHE=$TMPDIR/.hf/hub
 export HF_DATASETS_CACHE=$TMPDIR/.hf/datasets
 export TRANSFORMERS_CACHE=$TMPDIR/.hf/transformers
 
-export DATA_LOCATION=$TMPDIR/PTMs_Train
-export CHECKPOINT_DIR=$TMPDIR/"$SLURM_JOB_NAME"_"$SLURM_JOB_ID"_checkpoints
-export WANDB_NAME="$SLURM_JOB_NAME"_"$SLURM_JOB_ID"
+export LR_SCHEDULE=warmup_cosine
 
-export USE_CLR=True
-export LEARNING_RATE=2e-4
+export WARMUP_COSINE_START_LR=1.6e-5
+export WARMUP_COSINE_PEAK_LR=1.2e-4
+export WARMUP_COSINE_MIN_LR=1.6e-5
+
 export NUM_WORKERS=16
 export BATCH_SIZE=1024
 export N_EPOCHS=120
 export DLOMIX_BACKEND=pytorch
 export UNCERTAINTY_AWARE=True
+
+export DATA_LOCATION=$TMPDIR/PTMs_Train
+export CHECKPOINT_DIR=$TMPDIR/"$SLURM_JOB_NAME"_"$SLURM_JOB_ID"_checkpoints
+export WANDB_NAME="$SLURM_JOB_NAME"_"$SLURM_JOB_ID"
 
 mkdir -p $CHECKPOINT_DIR
 
