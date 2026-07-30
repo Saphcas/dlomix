@@ -2,7 +2,7 @@
 #SBATCH -A naiss2026-3-479-gpu -p gpu --gpus=1
 #SBATCH -t 42:00:00
 #SBATCH --signal=B:TERM@120
-#SBATCH -J dlomix-ua-train
+#SBATCH -J dlomix-ua-warmup-cosine-train
 #SBATCH -o /nobackup/proj/disk/kall/personal/%u/logs/%x-%j.out
 
 set -Eeuo pipefail
