@@ -214,6 +214,11 @@ def gaussian_nll(
     encoded_sequence: torch.Tensor,
     fragments_per_cleavage=None,
     has_termini: bool = True,
+    normalization: str = "global_ion",
+    presence_weight: float = 1.0,
+    intensity_weight: float = 1.0,
+    variance_parameterization: str = "log_var",
+    min_variance: float = 1e-4,
 ) -> torch.Tensor:
     """
     Calculates a zero-inflated log-normal loss.
@@ -237,27 +242,58 @@ def gaussian_nll(
         A tensor containing predicted mean log-intensities, with the same shape
         as `y_true`.
     y_log_var_pred : torch.Tensor
-        A tensor containing predicted log variances, with the same shape as
-        `y_true`.
+        A tensor containing predicted log variances for `log_var`, or raw
+        variance parameters for `softplus_variance`.
     y_presence_pred : torch.Tensor
         A tensor containing predicted presence logits, with the same shape as
         `y_true`.
     encoded_sequence : torch.Tensor
-        Tensor containing the number encoded sequence. Shape is equal to
+        Tensor containing the encoded sequence with shape
         `(batch_size, max_seq_len)`.
     fragments_per_cleavage : int, optional
         Number of fragment-ion channels predicted per peptide cleavage. Inferred
         from tensor shape when omitted.
     has_termini : bool, optional
         Whether encoded sequences include N- and C-terminal tokens.
+    normalization : {"global_ion", "component_mean", "per_peptide", "per_peptide_component_mean"}
+        ``global_ion`` preserves the original normalization. ``component_mean``
+        averages BCE over valid ions and Gaussian NLL over positive ions
+        separately. ``per_peptide`` averages the combined mixture loss within
+        each peptide before averaging peptides. ``per_peptide_component_mean``
+        averages BCE over valid ions and Gaussian NLL over present ions within
+        each peptide before averaging peptides.
+    presence_weight : float
+        Weight applied to the Bernoulli/presence component.
+    intensity_weight : float
+        Weight applied to the positive-ion Gaussian component.
+    variance_parameterization : {"log_var", "softplus_variance"}
+        ``log_var`` interprets the second head as ``log(sigma^2)``. The
+        ``softplus_variance`` option interprets it as an unconstrained raw value
+        and computes ``sigma^2 = min_variance + softplus(raw)``.
+    min_variance : float
+        Positive variance floor used by ``softplus_variance``.
 
     Returns
     -------
     torch.Tensor
-        Mean per-valid-fragment mixture negative log likelihood.
-
+        The normalized mixture negative log likelihood.
     """
     epsilon = 1e-7
+    normalization = str(normalization).strip().lower()
+    variance_parameterization = str(variance_parameterization).strip().lower()
+    if normalization not in {"global_ion", "component_mean", "per_peptide", "per_peptide_component_mean"}:
+        raise ValueError(
+            "normalization must be global_ion, component_mean, per_peptide, "
+            "or per_peptide_component_mean"
+        )
+    if variance_parameterization not in {"log_var", "softplus_variance"}:
+        raise ValueError(
+            "variance_parameterization must be log_var or softplus_variance"
+        )
+    if presence_weight < 0 or intensity_weight < 0:
+        raise ValueError("Loss component weights must be non-negative.")
+    if min_variance <= 0:
+        raise ValueError("min_variance must be positive.")
 
     # Autocast may run the model in bf16/fp16. Keep the probabilistic loss in
     # fp32; tiny variances and log-intensity errors are exactly where reduced
@@ -290,11 +326,12 @@ def gaussian_nll(
     #   -t_k * log(sigmoid(logit_k)) - (1 - t_k) * log(1 - sigmoid(logit_k))
     # which is exactly the Bernoulli part of the pasted mixture objective:
     #   -log p_k for y_k > 0, and -log(1 - p_k) for y_k = 0.
-    # We use reduction="sum" first so the final normalization is controlled by
-    # the same valid-fragment count as the full mixture loss.
+    # Keep the per-ion values so normalization can be selected explicitly.
     presence_target = present.to(dtype=y_presence_pred.dtype)
-    presence_loss = F.binary_cross_entropy_with_logits(
-        y_presence_pred[valid], presence_target[valid], reduction="sum"
+    presence_per_ion = F.binary_cross_entropy_with_logits(
+        y_presence_pred,
+        presence_target,
+        reduction="none",
     )
 
     if not torch.isfinite(y_log_mean_pred[valid]).all():
@@ -306,34 +343,85 @@ def gaussian_nll(
 
     if torch.any(present):
         # The Gaussian term in the derivation is over log(y_k + eps), not raw
-        # intensity. Therefore the model's mean head is interpreted as mu_k in
-        # log-intensity space, and the target passed to GaussianNLL is log y.
-        log_target = torch.log(y_true[present].to(dtype=y_log_mean_pred.dtype) + epsilon)
-
-        # Use the standard log-variance parameterization s = log(sigma^2):
-        #   GaussianNLL_k = 0.5 * (exp(-s_k) * (log_y_k - mu_k)^2
-        #                         + s_k + log(2*pi))
-        # This is algebraically the same Gaussian NLL as PyTorch's
-        # gaussian_nll_loss with var=sigma^2, but avoids requiring the network
-        # to output a strictly positive variance directly. Keep this unclamped
-        # for the baseline experiment so out-of-range log variances still get
-        # gradients from the likelihood instead of hitting clamp dead zones.
-        log_var = y_log_var_pred[present]
+        # intensity. Therefore the mean head is mu_k in log-intensity space.
+        log_target = torch.log(y_true[present] + epsilon)
+        variance_head = y_log_var_pred[present]
         squared_error = torch.square(log_target - y_log_mean_pred[present])
-        intensity_loss = 0.5 * (
-            torch.exp(-log_var) * squared_error
-            + log_var
-            + torch.log(
-                torch.tensor(2.0 * np.pi, device=log_var.device, dtype=log_var.dtype)
+        log_two_pi = torch.log(
+            torch.tensor(
+                2.0 * np.pi,
+                device=variance_head.device,
+                dtype=variance_head.dtype,
             )
         )
-        intensity_loss = intensity_loss.sum()
-    else:
-        # This is not a data-repair guard: if all valid ions are observed as zero,
-        # the derivation's sum over {k: y_k > 0} is an empty sum, i.e. zero. The
-        # batch still trains through the Bernoulli absence terms above.
-        intensity_loss = y_log_mean_pred.sum() * 0.0
 
-    total_loss = presence_loss + intensity_loss
-    normalizer = valid.sum().to(dtype=total_loss.dtype)
-    return total_loss / normalizer
+        if variance_parameterization == "log_var":
+            # Preserve the original baseline arithmetic: exp(-s) * error^2,
+            # where the head predicts s = log(sigma^2).
+            log_variance = variance_head
+            scaled_squared_error = torch.exp(-log_variance) * squared_error
+        else:
+            # Experimental parameterization: the head is unconstrained, while
+            # the positive variance and its floor are enforced inside the loss.
+            variance = float(min_variance) + F.softplus(variance_head)
+            log_variance = torch.log(variance)
+            scaled_squared_error = squared_error / variance
+
+        intensity_per_ion_values = 0.5 * (
+            scaled_squared_error + log_variance + log_two_pi
+        )
+    else:
+        # The Gaussian sum over {k: y_k > 0} is an empty sum. The batch still
+        # trains through its Bernoulli absence terms.
+        intensity_per_ion_values = y_log_mean_pred[present] * 0.0
+
+    presence_values = presence_per_ion[valid]
+    intensity_per_ion = torch.zeros_like(y_true)
+    intensity_per_ion[present] = intensity_per_ion_values
+
+    if normalization == "global_ion":
+        # Previous behavior: both sums are divided by the total number of valid
+        # ions, so the effective Gaussian weight changes with batch prevalence.
+        normalizer = valid.sum().to(dtype=y_true.dtype)
+        presence_loss = presence_values.sum() / normalizer
+        intensity_loss = intensity_per_ion.sum() / normalizer
+    elif normalization == "component_mean":
+        # Give BCE and positive-ion Gaussian NLL stable, explicit scales.
+        presence_loss = presence_values.mean()
+        intensity_loss = (
+            intensity_per_ion_values.mean()
+            if torch.any(present)
+            else y_log_mean_pred.sum() * 0.0
+        )
+    elif normalization == "per_peptide":
+        # Each peptide contributes one averaged combined loss, regardless of its
+        # number of theoretical ions. This targets an average per-PSM objective.
+        valid_count_per_peptide = valid.sum(dim=1).clamp_min(1).to(y_true.dtype)
+        presence_loss = (
+            presence_per_ion.masked_fill(~valid, 0.0).sum(dim=1)
+            / valid_count_per_peptide
+        ).mean()
+        intensity_loss = (
+            intensity_per_ion.sum(dim=1) / valid_count_per_peptide
+        ).mean()
+    else:
+        # Average each observed component within each peptide separately. The
+        # Gaussian denominator is the number of present ions, so sparse peptides
+        # do not silently reduce the relative intensity-head contribution.
+        valid_count_per_peptide = valid.sum(dim=1).clamp_min(1).to(y_true.dtype)
+        present_count_per_peptide = present.sum(dim=1)
+        presence_loss = (
+            presence_per_ion.masked_fill(~valid, 0.0).sum(dim=1)
+            / valid_count_per_peptide
+        ).mean()
+        intensity_sum_per_peptide = intensity_per_ion.sum(dim=1)
+        has_present = present_count_per_peptide > 0
+        if torch.any(has_present):
+            intensity_loss = (
+                intensity_sum_per_peptide[has_present]
+                / present_count_per_peptide[has_present].to(y_true.dtype)
+            ).mean()
+        else:
+            intensity_loss = y_log_mean_pred.sum() * 0.0
+
+    return presence_weight * presence_loss + intensity_weight * intensity_loss

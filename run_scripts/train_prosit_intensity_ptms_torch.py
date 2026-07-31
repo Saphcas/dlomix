@@ -129,7 +129,7 @@ CONFIG = {
     "max_train_batches": int(os.environ.get("MAX_TRAIN_BATCHES", 0)),  # 0 = no cap
     "max_val_batches": int(os.environ.get("MAX_VAL_BATCHES", 0)),
     "max_test_batches": int(os.environ.get("MAX_TEST_BATCHES", 0)),
-    "save": None,
+    "save": os.environ.get("SAVE", None),
     "checkpoint_save": os.environ.get("CHECKPOINT_DIR", None), # Give as /path/to/dir
     # --- Optional torch.compile acceleration ---
     "use_torch_compile": False,
@@ -153,6 +153,12 @@ CONFIG = {
     "profile_dataloader_move_to_device": _env_bool("PROFILE_DATALOADER_MOVE_TO_DEVICE", False),
     # --- Optional optimizer / stability knobs (evidence: repo examples) ---
     "grad_clip_max_norm": float(os.environ.get("GRAD_CLIP_MAX_NORM", 1.0)),  # evidence: torch intensity examples clip with max_norm=1
+    # --- Uncertainty-aware loss ablation knobs ---
+    "loss_normalization": os.environ.get("LOSS_NORMALIZATION", "global_ion").strip().lower(),  # global_ion | component_mean | per_peptide | per_peptide_component_mean
+    "presence_loss_weight": float(os.environ.get("PRESENCE_LOSS_WEIGHT", 1.0)),
+    "intensity_loss_weight": float(os.environ.get("INTENSITY_LOSS_WEIGHT", 1.0)),
+    "variance_parameterization": os.environ.get("VARIANCE_PARAMETERIZATION", "log_var").strip().lower(),  # log_var | softplus_variance
+    "min_variance": float(os.environ.get("MIN_VARIANCE", 1e-4)),
     # "weight_decay": 0.0,  # evidence: not used in repo examples; keep off unless you add it intentionally
     # --- PROSIT-PTM FII schedule knobs (paper hyperparameters) ---
     "lr_schedule": os.environ.get("LR_SCHEDULE", "auto").strip().lower(),  # auto | clr | warmup_cosine | constant
@@ -600,6 +606,8 @@ def _variance_diagnostics(
     pred_log_var: torch.Tensor,
     prefix: str,
     epsilon: float = 1e-7,
+    variance_parameterization: str = "log_var",
+    min_variance: float = 1e-4,
 ) -> dict:
     # The Gaussian term is only evaluated for present fragments, so these
     # diagnostics use the same domain. The loss itself remains unclamped; the
@@ -612,18 +620,22 @@ def _variance_diagnostics(
     if not torch.any(present):
         return {}
 
-    log_var = pred_log_var[present]
-    finite = torch.isfinite(log_var)
+    variance_head = pred_log_var[present]
+    finite = torch.isfinite(variance_head)
     if not torch.any(finite):
         return {}
 
-    log_var = log_var[finite]
+    variance_head = variance_head[finite]
     log_target = torch.log(y_true[present][finite] + epsilon)
     squared_log_residual = torch.square(log_target - pred_log_mean[present][finite])
 
-    log_var_for_exp = torch.clamp(log_var, min=-30.0, max=30.0)
-    pred_var = torch.exp(log_var_for_exp)
-    pred_sigma = torch.exp(0.5 * log_var_for_exp)
+    if str(variance_parameterization).strip().lower() == "softplus_variance":
+        pred_var = float(min_variance) + torch.nn.functional.softplus(variance_head)
+        log_pred_var = torch.log(pred_var)
+    else:
+        log_pred_var = torch.clamp(variance_head, min=-30.0, max=30.0)
+        pred_var = torch.exp(log_pred_var)
+    pred_sigma = torch.sqrt(pred_var)
     calibration_ratio = squared_log_residual / torch.clamp(pred_var, min=1e-12)
 
     return {
@@ -879,6 +891,11 @@ def main() -> int:
             "profile_dataloader_only_batches": args.profile_dataloader_only_batches,
             "profile_dataloader_move_to_device": args.profile_dataloader_move_to_device,
             "grad_clip_max_norm": args.grad_clip_max_norm,
+            "loss_normalization": args.loss_normalization,
+            "presence_loss_weight": args.presence_loss_weight,
+            "intensity_loss_weight": args.intensity_loss_weight,
+            "variance_parameterization": args.variance_parameterization,
+            "min_variance": args.min_variance,
             "lr_schedule": lr_schedule,
             "use_clr": lr_schedule == "clr",
             "clr_base_lr": args.clr_base_lr,
@@ -1237,7 +1254,18 @@ def main() -> int:
                     if do_profile:
                         _maybe_cuda_sync(device, profile_cuda_sync)
                         t_loss_0 = time.perf_counter()
-                    loss = gaussian_nll(batch[columns.label], pred_log_mean, pred_log_var, pred_presence_logit, batch[columns.sequence])
+                    loss = gaussian_nll(
+                        batch[columns.label],
+                        pred_log_mean,
+                        pred_log_var,
+                        pred_presence_logit,
+                        batch[columns.sequence],
+                        normalization=args.loss_normalization,
+                        presence_weight=args.presence_loss_weight,
+                        intensity_weight=args.intensity_loss_weight,
+                        variance_parameterization=args.variance_parameterization,
+                        min_variance=args.min_variance,
+                    )
                     _raise_for_nonfinite_loss(
                         loss,
                         epoch=epoch,
@@ -1291,7 +1319,12 @@ def main() -> int:
                     batch[columns.label], pred_log_mean, pred_presence_logit
                 )
                 batch_variance_stats = _variance_diagnostics(
-                    batch[columns.label], pred_log_mean, pred_log_var, "train_batch"
+                    batch[columns.label],
+                    pred_log_mean,
+                    pred_log_var,
+                    "train_batch",
+                    variance_parameterization=args.variance_parameterization,
+                    min_variance=args.min_variance,
                 )
 
                 train_mae_total += batch_mae
@@ -1356,7 +1389,18 @@ def main() -> int:
                     batch = _cast_batch_types(batch, columns)
                     with _amp_autocast_context(device, amp_enabled, amp_dtype):
                         pred_log_mean, pred_log_var, pred_presence_logit = model(batch)
-                        val_loss = gaussian_nll(batch[columns.label], pred_log_mean, pred_log_var, pred_presence_logit, batch[columns.sequence])
+                        val_loss = gaussian_nll(
+                            batch[columns.label],
+                            pred_log_mean,
+                            pred_log_var,
+                            pred_presence_logit,
+                            batch[columns.sequence],
+                            normalization=args.loss_normalization,
+                            presence_weight=args.presence_loss_weight,
+                            intensity_weight=args.intensity_loss_weight,
+                            variance_parameterization=args.variance_parameterization,
+                            min_variance=args.min_variance,
+                        )
                     _raise_for_nonfinite_loss(
                         val_loss,
                         epoch=epoch,
@@ -1377,7 +1421,12 @@ def main() -> int:
                         batch[columns.label], pred_log_mean, pred_presence_logit
                     )
                     batch_variance_stats = _variance_diagnostics(
-                        batch[columns.label], pred_log_mean, pred_log_var, "val_batch"
+                        batch[columns.label],
+                        pred_log_mean,
+                        pred_log_var,
+                        "val_batch",
+                        variance_parameterization=args.variance_parameterization,
+                        min_variance=args.min_variance,
                     )
 
                     val_mean_absolute_error_total += batch_mae
@@ -1777,7 +1826,18 @@ def main() -> int:
                     batch = _cast_batch_types(batch, columns)
                     with _amp_autocast_context(device, amp_enabled, amp_dtype):
                         pred_log_mean, pred_log_var, pred_presence_logit = model(batch)
-                        test_loss = gaussian_nll(batch[columns.label], pred_log_mean, pred_log_var, pred_presence_logit, batch[columns.sequence])
+                        test_loss = gaussian_nll(
+                            batch[columns.label],
+                            pred_log_mean,
+                            pred_log_var,
+                            pred_presence_logit,
+                            batch[columns.sequence],
+                            normalization=args.loss_normalization,
+                            presence_weight=args.presence_loss_weight,
+                            intensity_weight=args.intensity_loss_weight,
+                            variance_parameterization=args.variance_parameterization,
+                            min_variance=args.min_variance,
+                        )
                     test_loss_total += test_loss.item()
                     test_batches += 1
                     test_it.set_postfix(loss=f"{test_loss.item():.4f}")

@@ -153,3 +153,100 @@ def test_gaussian_nll_raises_when_no_valid_fragments_remain():
         assert "No valid fragment ions remain" in str(exc)
     else:
         raise AssertionError("Expected gaussian_nll to raise ValueError")
+
+
+
+def test_gaussian_nll_component_mean_normalizes_components_separately():
+    y_true = torch.tensor([[1.0], [0.0]])
+    encoded_sequence = torch.tensor([[21, 1, 2, 22], [21, 1, 2, 22]])
+    y_mean_pred = torch.zeros_like(y_true)
+    y_log_var_pred = torch.zeros_like(y_true)
+    presence_logits = torch.zeros_like(y_true)
+
+    loss = gaussian_nll(
+        y_true,
+        y_mean_pred,
+        y_log_var_pred,
+        presence_logits,
+        encoded_sequence,
+        fragments_per_cleavage=1,
+        normalization="component_mean",
+    )
+
+    expected = torch.log(torch.tensor(2.0)) + 0.5 * torch.log(
+        torch.tensor(2.0 * np.pi)
+    )
+    assert torch.allclose(loss, expected, atol=1e-6)
+
+
+def test_gaussian_nll_softplus_variance_is_finite_and_floored():
+    y_true = torch.tensor([[1.0]])
+    encoded_sequence = torch.tensor([[21, 1, 2, 22]])
+    y_mean_pred = torch.zeros_like(y_true)
+    raw_variance = torch.tensor([[-100.0]])
+    presence_logits = torch.zeros_like(y_true)
+    min_variance = 0.25
+
+    loss = gaussian_nll(
+        y_true,
+        y_mean_pred,
+        raw_variance,
+        presence_logits,
+        encoded_sequence,
+        fragments_per_cleavage=1,
+        variance_parameterization="softplus_variance",
+        min_variance=min_variance,
+    )
+
+    expected_gaussian = 0.5 * torch.log(torch.tensor(2.0 * np.pi * min_variance))
+    expected = torch.log(torch.tensor(2.0)) + expected_gaussian
+    assert torch.isfinite(loss)
+    assert torch.allclose(loss, expected, atol=1e-5)
+
+
+
+def test_gaussian_nll_per_peptide_component_mean_normalizes_positive_ions_separately():
+    y_true = torch.tensor([[1.0, 0.0], [1.0, 1.0]])
+    encoded_sequence = torch.tensor([[21, 1, 2, 22], [21, 1, 2, 22]])
+    y_mean_pred = torch.zeros_like(y_true)
+    y_log_var_pred = torch.zeros_like(y_true)
+    presence_logits = torch.zeros_like(y_true)
+
+    loss = gaussian_nll(
+        y_true,
+        y_mean_pred,
+        y_log_var_pred,
+        presence_logits,
+        encoded_sequence,
+        fragments_per_cleavage=2,
+        normalization="per_peptide_component_mean",
+    )
+
+    expected = torch.log(torch.tensor(2.0)) + 0.5 * torch.log(
+        torch.tensor(2.0 * np.pi)
+    )
+    assert torch.allclose(loss, expected, atol=1e-6)
+
+
+def test_gaussian_nll_per_peptide_component_mean_excludes_all_zero_peptides():
+    y_true = torch.tensor([[0.0, 0.0], [1.0, 1.0]])
+    encoded_sequence = torch.tensor([[21, 1, 2, 22], [21, 1, 2, 22]])
+    y_mean_pred = torch.zeros_like(y_true)
+    y_log_var_pred = torch.zeros_like(y_true)
+    presence_logits = torch.zeros_like(y_true)
+
+    loss = gaussian_nll(
+        y_true,
+        y_mean_pred,
+        y_log_var_pred,
+        presence_logits,
+        encoded_sequence,
+        fragments_per_cleavage=2,
+        normalization="per_peptide_component_mean",
+    )
+
+    # The Gaussian component is averaged only over the peptide with positives.
+    expected = torch.log(torch.tensor(2.0)) + 0.5 * torch.log(
+        torch.tensor(2.0 * np.pi)
+    )
+    assert torch.allclose(loss, expected, atol=1e-6)
