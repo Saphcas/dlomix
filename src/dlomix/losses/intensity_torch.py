@@ -1,5 +1,6 @@
 import numpy as np
 import torch
+from ..uncertainty_initialization import LOG_INTENSITY_EPSILON
 import torch.nn.functional as F
 
 
@@ -32,7 +33,7 @@ def masked_spectral_distance(
 
     # To avoid numerical instability during training on GPUs,
     # we add a fuzzing constant epsilon of 1×10−7 to all vectors
-    epsilon = 1e-7
+    epsilon = LOG_INTENSITY_EPSILON
 
     # Masking: we multiply values by (true + 1) because then the peaks that cannot
     # be there (and have value of -1 as explained above) won't be considered
@@ -77,7 +78,7 @@ def masked_pearson_correlation_distance(
 
     """
 
-    epsilon = 1e-7
+    epsilon = LOG_INTENSITY_EPSILON
 
     # Masking: we multiply values by (true + 1) because then the peaks that cannot
     # be there (and have value of -1 as explained above) won't be considered
@@ -278,7 +279,7 @@ def gaussian_nll(
     torch.Tensor
         The normalized mixture negative log likelihood.
     """
-    epsilon = 1e-7
+    epsilon = LOG_INTENSITY_EPSILON
     normalization = str(normalization).strip().lower()
     variance_parameterization = str(variance_parameterization).strip().lower()
     if normalization not in {"global_ion", "component_mean", "per_peptide", "per_peptide_component_mean"}:

@@ -78,6 +78,7 @@ import numpy as np
 from dlomix.data import StreamingFragmentIonIntensityDataset
 from dlomix.losses.intensity_torch import masked_spectral_distance, gaussian_nll
 from dlomix.models import PrositIntensityPredictor, PrositIntensityUncertaintyPredictor
+from dlomix.uncertainty_initialization import apply_empirical_head_initialization
 
 # -----------------------------------------------------------------------------
 # Configuration
@@ -159,6 +160,14 @@ CONFIG = {
     "intensity_loss_weight": float(os.environ.get("INTENSITY_LOSS_WEIGHT", 1.0)),
     "variance_parameterization": os.environ.get("VARIANCE_PARAMETERIZATION", "log_var").strip().lower(),  # log_var | softplus_variance
     "min_variance": float(os.environ.get("MIN_VARIANCE", 1e-4)),
+    # --- Optional empirical output-head bias initialization ---
+    "mean_head_init": os.environ.get("MEAN_HEAD_INIT", "default").strip().lower(),  # default | empirical
+    "presence_head_init": os.environ.get("PRESENCE_HEAD_INIT", "default").strip().lower(),  # default | empirical
+    "variance_head_init": os.environ.get("VARIANCE_HEAD_INIT", "default").strip().lower(),  # default | empirical_marginal
+    "head_init_stats": (
+        os.environ.get("HEAD_INIT_STATS", os.environ.get("MEAN_HEAD_INIT_VALUES", "")).strip()
+        or None
+    ),
     # "weight_decay": 0.0,  # evidence: not used in repo examples; keep off unless you add it intentionally
     # --- PROSIT-PTM FII schedule knobs (paper hyperparameters) ---
     "lr_schedule": os.environ.get("LR_SCHEDULE", "auto").strip().lower(),  # auto | clr | warmup_cosine | constant
@@ -896,6 +905,10 @@ def main() -> int:
             "intensity_loss_weight": args.intensity_loss_weight,
             "variance_parameterization": args.variance_parameterization,
             "min_variance": args.min_variance,
+            "mean_head_init": args.mean_head_init,
+            "presence_head_init": args.presence_head_init,
+            "variance_head_init": args.variance_head_init,
+            "head_init_stats": args.head_init_stats,
             "lr_schedule": lr_schedule,
             "use_clr": lr_schedule == "clr",
             "clr_base_lr": args.clr_base_lr,
@@ -1024,8 +1037,32 @@ def main() -> int:
             },
             with_termini=args.with_termini,
         ).to(device)
+        applied_head_initialization = apply_empirical_head_initialization(
+            model,
+            mean_mode=args.mean_head_init,
+            presence_mode=args.presence_head_init,
+            variance_mode=args.variance_head_init,
+            stats_path=args.head_init_stats,
+            variance_parameterization=args.variance_parameterization,
+            min_variance=args.min_variance,
+        )
+        if applied_head_initialization:
+            print(f"Applied empirical uncertainty-head initialization: {applied_head_initialization}")
+            run.config.update(
+                {"applied_head_initialization": applied_head_initialization},
+                allow_val_change=True,
+            )
         model = _maybe_compile_model(model, args)
     else:
+        if any(
+            mode != "default"
+            for mode in (
+                args.mean_head_init,
+                args.presence_head_init,
+                args.variance_head_init,
+            )
+        ):
+            raise ValueError("Empirical head initialization is only available for uncertainty-aware training.")
         model = PrositIntensityPredictor(
             seq_length=args.max_seq_len,
             **{

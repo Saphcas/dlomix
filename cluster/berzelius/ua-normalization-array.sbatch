@@ -2,7 +2,7 @@
 #SBATCH -A Berzelius-2026-159
 #SBATCH -p berzelius
 #SBATCH --gpus=1
-#SBATCH --array=0-3%2
+#SBATCH --array=0-3
 #SBATCH --time=10:00:00
 #SBATCH --signal=B:TERM@120
 #SBATCH --job-name=ua-normalization
