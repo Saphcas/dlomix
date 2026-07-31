@@ -99,13 +99,11 @@ def test_gaussian_nll_masks_impossible_fragments_and_uses_log_targets():
         fragments_per_cleavage=2,
     )
 
-    valid_count = 5
-    present_count = 3
-    expected_bce = valid_count * torch.nn.functional.binary_cross_entropy_with_logits(
-        torch.tensor(0.0), torch.tensor(1.0), reduction="sum"
+    # The default averages each component within each peptide. With zero
+    # residuals and zero logits, both peptides have the same component means.
+    expected = torch.log(torch.tensor(2.0)) + 0.5 * torch.log(
+        torch.tensor(2.0 * np.pi)
     )
-    expected_nll = present_count * (0.5 * torch.log(torch.tensor(2.0 * np.pi)))
-    expected = (expected_bce + expected_nll) / valid_count
 
     assert torch.allclose(loss, expected, atol=1e-6)
 

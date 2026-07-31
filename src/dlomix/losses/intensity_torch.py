@@ -215,7 +215,7 @@ def gaussian_nll(
     encoded_sequence: torch.Tensor,
     fragments_per_cleavage=None,
     has_termini: bool = True,
-    normalization: str = "global_ion",
+    normalization: str = "per_peptide_component_mean",
     presence_weight: float = 1.0,
     intensity_weight: float = 1.0,
     variance_parameterization: str = "log_var",
@@ -256,13 +256,11 @@ def gaussian_nll(
         from tensor shape when omitted.
     has_termini : bool, optional
         Whether encoded sequences include N- and C-terminal tokens.
-    normalization : {"global_ion", "component_mean", "per_peptide", "per_peptide_component_mean"}
-        ``global_ion`` preserves the original normalization. ``component_mean``
-        averages BCE over valid ions and Gaussian NLL over positive ions
-        separately. ``per_peptide`` averages the combined mixture loss within
-        each peptide before averaging peptides. ``per_peptide_component_mean``
-        averages BCE over valid ions and Gaussian NLL over present ions within
-        each peptide before averaging peptides.
+    normalization : {"component_mean", "per_peptide", "per_peptide_component_mean"}
+        ``per_peptide_component_mean`` is the default: it averages BCE over
+        valid ions and Gaussian NLL over present ions within each peptide, then
+        averages peptides. ``component_mean`` averages each component globally;
+        ``per_peptide`` averages the combined mixture loss within each peptide.
     presence_weight : float
         Weight applied to the Bernoulli/presence component.
     intensity_weight : float
@@ -282,10 +280,10 @@ def gaussian_nll(
     epsilon = LOG_INTENSITY_EPSILON
     normalization = str(normalization).strip().lower()
     variance_parameterization = str(variance_parameterization).strip().lower()
-    if normalization not in {"global_ion", "component_mean", "per_peptide", "per_peptide_component_mean"}:
+    if normalization not in {"component_mean", "per_peptide", "per_peptide_component_mean"}:
         raise ValueError(
-            "normalization must be global_ion, component_mean, per_peptide, "
-            "or per_peptide_component_mean"
+            "normalization must be component_mean, per_peptide, or "
+            "per_peptide_component_mean"
         )
     if variance_parameterization not in {"log_var", "softplus_variance"}:
         raise ValueError(
@@ -380,13 +378,7 @@ def gaussian_nll(
     intensity_per_ion = torch.zeros_like(y_true)
     intensity_per_ion[present] = intensity_per_ion_values
 
-    if normalization == "global_ion":
-        # Previous behavior: both sums are divided by the total number of valid
-        # ions, so the effective Gaussian weight changes with batch prevalence.
-        normalizer = valid.sum().to(dtype=y_true.dtype)
-        presence_loss = presence_values.sum() / normalizer
-        intensity_loss = intensity_per_ion.sum() / normalizer
-    elif normalization == "component_mean":
+    if normalization == "component_mean":
         # Give BCE and positive-ion Gaussian NLL stable, explicit scales.
         presence_loss = presence_values.mean()
         intensity_loss = (

@@ -155,7 +155,7 @@ CONFIG = {
     # --- Optional optimizer / stability knobs (evidence: repo examples) ---
     "grad_clip_max_norm": float(os.environ.get("GRAD_CLIP_MAX_NORM", 1.0)),  # evidence: torch intensity examples clip with max_norm=1
     # --- Uncertainty-aware loss ablation knobs ---
-    "loss_normalization": os.environ.get("LOSS_NORMALIZATION", "global_ion").strip().lower(),  # global_ion | component_mean | per_peptide | per_peptide_component_mean
+    "loss_normalization": os.environ.get("LOSS_NORMALIZATION", "per_peptide_component_mean").strip().lower(),  # component_mean | per_peptide | per_peptide_component_mean
     "presence_loss_weight": float(os.environ.get("PRESENCE_LOSS_WEIGHT", 1.0)),
     "intensity_loss_weight": float(os.environ.get("INTENSITY_LOSS_WEIGHT", 1.0)),
     "variance_parameterization": os.environ.get("VARIANCE_PARAMETERIZATION", "log_var").strip().lower(),  # log_var | softplus_variance
