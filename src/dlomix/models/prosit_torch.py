@@ -385,6 +385,7 @@ class PrositIntensityUncertaintyPredictor(nn.Module):
         input_keys=None,
         meta_data_keys=None,
         with_termini=True,
+        faithful_mode="off",
     ):
         super(PrositIntensityUncertaintyPredictor, self).__init__()
 
@@ -398,6 +399,11 @@ class PrositIntensityUncertaintyPredictor(nn.Module):
         self.use_prosit_ptm_features = use_prosit_ptm_features
         self.input_keys = input_keys
         self.meta_data_keys = meta_data_keys
+        self.faithful_mode = str(faithful_mode).strip().lower()
+        if self.faithful_mode not in {"off", "faithful_variance_only", "faithful_strict"}:
+            raise ValueError(
+                "faithful_mode must be off, faithful_variance_only, or faithful_strict"
+            )
 
         # maximum number of fragment ions
         self.max_ion = self.seq_length - 1
@@ -571,8 +577,13 @@ class PrositIntensityUncertaintyPredictor(nn.Module):
         x = self.decoder(x)
 
         x_log_mean = self.log_mean_regressor(x)
-        x_log_var = self.log_var_regressor(x)
-        x_presence = self.presence_regressor(x)
+        # Faithful optimization prevents covariance/NLL gradients from changing
+        # the shared decoder and encoder. The variance head still trains from a
+        # detached view of the current shared representation.
+        variance_input = x.detach() if self.faithful_mode != "off" else x
+        x_log_var = self.log_var_regressor(variance_input)
+        presence_input = x.detach() if self.faithful_mode == "faithful_strict" else x
+        x_presence = self.presence_regressor(presence_input)
         x = x_log_mean, x_log_var, x_presence
 
         return x

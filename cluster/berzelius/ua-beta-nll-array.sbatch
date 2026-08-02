@@ -1,0 +1,78 @@
+#!/bin/bash
+#SBATCH -A Berzelius-2026-159
+#SBATCH -p berzelius
+#SBATCH --gpus=1
+#SBATCH --array=0-3
+#SBATCH --time=10:00:00
+#SBATCH --signal=B:TERM@120
+#SBATCH --job-name=ua-beta-nll
+#SBATCH --output=slurm-%x-%A_%a.out
+
+set -Eeuo pipefail
+
+PROJECT_ROOT=/proj/bedrock/users/x_alfni/dlomix_Saphcas
+PYTHON=/proj/bedrock/users/x_alfni/conda-envs/dlomix-torch/bin/python
+DATA_DIR=/proj/bedrock/datasets/Prosit_PTMs/PTMs_Train
+CHECKPOINT_ROOT=/proj/bedrock/users/x_alfni/checkpoints/ua-beta-nll
+
+BETAS=(0 0.25 0.5 1.0)
+
+TASK_ID=${SLURM_ARRAY_TASK_ID:?SLURM_ARRAY_TASK_ID is required}
+if (( TASK_ID < 0 || TASK_ID >= ${#BETAS[@]} )); then
+    echo "Invalid array task id: ${TASK_ID}" >&2
+    exit 2
+fi
+
+BETA=${BETAS[$TASK_ID]}
+RUN_NAME="ua-beta-nll-${BETA}-bs${BATCH_SIZE:-4096}-${SLURM_ARRAY_JOB_ID}-${TASK_ID}"
+CHECKPOINT_DIR="${CHECKPOINT_ROOT}/${RUN_NAME}"
+
+mkdir -p "${CHECKPOINT_DIR}"
+cd "${PROJECT_ROOT}"
+
+module load buildenv-gcccuda/12.1.1-gcc12.3.0
+export PATH="$(dirname "${PYTHON}"):${PATH}"
+export PYTHONPATH="${PROJECT_ROOT}/src${PYTHONPATH:+:${PYTHONPATH}}"
+
+export DATA_LOCATION="${DATA_DIR}"
+export DLOMIX_BACKEND=torch
+export NUM_WORKERS="${NUM_WORKERS:-16}"
+export BATCH_SIZE="${BATCH_SIZE:-4096}"
+export N_EPOCHS="${N_EPOCHS:-30}"
+export EARLY_STOPPING_PATIENCE=0
+export SELECT_BEST_BY_VAL_LOSS=1
+
+export USE_AMP=0
+export GRAD_CLIP_MAX_NORM=1.0
+export LOSS_NORMALIZATION=component_mean
+export VARIANCE_PARAMETERIZATION=log_var
+export MIN_VARIANCE=1e-4
+
+export LR_SCHEDULE=warmup_cosine
+export WARMUP_COSINE_WARMUP_STEPS="${WARMUP_COSINE_WARMUP_STEPS:-6845}"
+export WARMUP_COSINE_START_LR="${WARMUP_COSINE_START_LR:-1.6e-5}"
+export WARMUP_COSINE_PEAK_LR="${WARMUP_COSINE_PEAK_LR:-1.2e-4}"
+export WARMUP_COSINE_MIN_LR="${WARMUP_COSINE_MIN_LR:-1.6e-5}"
+export WARMUP_COSINE_TOTAL_STEPS=0
+
+# Isolate beta-NLL from head initialization, variance-prior, and faithful modes.
+export MEAN_HEAD_INIT=default
+export PRESENCE_HEAD_INIT=default
+export VARIANCE_HEAD_INIT=default
+export VARIANCE_PRIOR_WEIGHT=0
+unset VARIANCE_PRIOR_STATS
+export FAITHFUL_MODE=off
+unset FAITHFUL_HETEROSCEDASTIC
+export BETA_NLL_BETA="${BETA}"
+
+export WANDB_NAME="${RUN_NAME}"
+export WANDB_RUN_GROUP=ua-beta-nll-default-init
+export CHECKPOINT_DIR
+export SAVE="${CHECKPOINT_DIR}/best_model.pth"
+
+echo "Starting ${RUN_NAME}"
+echo "  beta=${BETA_NLL_BETA} normalization=${LOSS_NORMALIZATION} batch_size=${BATCH_SIZE}"
+echo "  prior_weight=${VARIANCE_PRIOR_WEIGHT} faithful_mode=${FAITHFUL_MODE}"
+echo "  checkpoint=${CHECKPOINT_DIR}"
+
+exec "${PYTHON}" run_scripts/train_prosit_intensity_ptms_torch.py

@@ -78,7 +78,10 @@ import numpy as np
 from dlomix.data import StreamingFragmentIonIntensityDataset
 from dlomix.losses.intensity_torch import masked_spectral_distance, gaussian_nll
 from dlomix.models import PrositIntensityPredictor, PrositIntensityUncertaintyPredictor
-from dlomix.uncertainty_initialization import apply_empirical_head_initialization
+from dlomix.uncertainty_initialization import (
+    apply_empirical_head_initialization,
+    load_log_variance_prior_centers,
+)
 
 # -----------------------------------------------------------------------------
 # Configuration
@@ -155,11 +158,20 @@ CONFIG = {
     # --- Optional optimizer / stability knobs (evidence: repo examples) ---
     "grad_clip_max_norm": float(os.environ.get("GRAD_CLIP_MAX_NORM", 1.0)),  # evidence: torch intensity examples clip with max_norm=1
     # --- Uncertainty-aware loss ablation knobs ---
-    "loss_normalization": os.environ.get("LOSS_NORMALIZATION", "per_peptide_component_mean").strip().lower(),  # component_mean | per_peptide | per_peptide_component_mean
+    "loss_normalization": os.environ.get("LOSS_NORMALIZATION", "component_mean").strip().lower(),  # component_mean | per_peptide | per_peptide_component_mean
     "presence_loss_weight": float(os.environ.get("PRESENCE_LOSS_WEIGHT", 1.0)),
     "intensity_loss_weight": float(os.environ.get("INTENSITY_LOSS_WEIGHT", 1.0)),
     "variance_parameterization": os.environ.get("VARIANCE_PARAMETERIZATION", "log_var").strip().lower(),  # log_var | softplus_variance
     "min_variance": float(os.environ.get("MIN_VARIANCE", 1e-4)),
+    # Optional residual log-variance shrinkage. Off unless a positive weight is supplied.
+    "variance_prior_stats": os.environ.get("VARIANCE_PRIOR_STATS", "").strip() or None,
+    "variance_prior_weight": float(os.environ.get("VARIANCE_PRIOR_WEIGHT", 0.0)),
+    # Optional alternate heteroscedastic optimization objectives; baseline is beta=0, faithful=False.
+    "beta_nll_beta": float(os.environ.get("BETA_NLL_BETA", 0.0)),
+    "faithful_mode": os.environ.get(
+        "FAITHFUL_MODE",
+        "faithful_variance_only" if _env_bool("FAITHFUL_HETEROSCEDASTIC", False) else "off",
+    ).strip().lower(),  # off | faithful_variance_only | faithful_strict
     # --- Optional empirical output-head bias initialization ---
     "mean_head_init": os.environ.get("MEAN_HEAD_INIT", "default").strip().lower(),  # default | empirical
     "presence_head_init": os.environ.get("PRESENCE_HEAD_INIT", "default").strip().lower(),  # default | empirical
@@ -565,11 +577,13 @@ def _log_mean_to_intensity(
 ) -> torch.Tensor:
     # The uncertainty-aware mean head predicts mu in log-intensity space.
     # Metrics operate on raw nonnegative intensities, so convert exp(mu) - eps.
-    # Clamp only to avoid metric-side overflow if a bad run emits very large
-    # positive log means; the loss itself remains unclamped.
+    # Targets are normalized to [0, 1]. Clip only the decoded metric
+    # prediction to that range; the model output and training loss remain
+    # unconstrained by this metric safeguard.
     pred_intensity = torch.clamp(
         torch.exp(torch.clamp(pred_log_mean.detach().float(), max=20.0)) - epsilon,
         min=0.0,
+        max=1.0,
     )
     if pred_presence_logit is None:
         return pred_intensity
@@ -905,6 +919,10 @@ def main() -> int:
             "intensity_loss_weight": args.intensity_loss_weight,
             "variance_parameterization": args.variance_parameterization,
             "min_variance": args.min_variance,
+            "variance_prior_stats": args.variance_prior_stats,
+            "variance_prior_weight": args.variance_prior_weight,
+            "beta_nll_beta": args.beta_nll_beta,
+            "faithful_mode": args.faithful_mode,
             "mean_head_init": args.mean_head_init,
             "presence_head_init": args.presence_head_init,
             "variance_head_init": args.variance_head_init,
@@ -1036,6 +1054,7 @@ def main() -> int:
                 "PRECURSOR_CHARGE_KEY": columns.precursor_charge,
             },
             with_termini=args.with_termini,
+            faithful_mode=args.faithful_mode,
         ).to(device)
         applied_head_initialization = apply_empirical_head_initialization(
             model,
@@ -1063,6 +1082,8 @@ def main() -> int:
             )
         ):
             raise ValueError("Empirical head initialization is only available for uncertainty-aware training.")
+        if args.faithful_mode != "off":
+            raise ValueError("FAITHFUL_MODE is only available for uncertainty-aware training.")
         model = PrositIntensityPredictor(
             seq_length=args.max_seq_len,
             **{
@@ -1086,6 +1107,24 @@ def main() -> int:
             with_termini=args.with_termini,
         ).to(device)
         model = _maybe_compile_model(model, args)
+
+    variance_prior_centers = None
+    if args.variance_prior_stats:
+        if not args.uncertainty_aware:
+            raise ValueError("VARIANCE_PRIOR_STATS is only available for uncertainty-aware training.")
+        variance_prior_centers = load_log_variance_prior_centers(
+            args.variance_prior_stats, int(getattr(args, "len_fion", 6))
+        )
+        print(
+            "Loaded residual log-variance prior centers "
+            f"from {args.variance_prior_stats}: {variance_prior_centers.tolist()}"
+        )
+        run.config.update(
+            {"applied_log_variance_prior_centers": variance_prior_centers.tolist()},
+            allow_val_change=True,
+        )
+    elif args.variance_prior_weight > 0:
+        raise ValueError("VARIANCE_PRIOR_STATS is required when VARIANCE_PRIOR_WEIGHT is positive.")
 
     clr_enabled = lr_schedule == "clr"
     warmup_cosine_enabled = lr_schedule == "warmup_cosine"
@@ -1291,7 +1330,7 @@ def main() -> int:
                     if do_profile:
                         _maybe_cuda_sync(device, profile_cuda_sync)
                         t_loss_0 = time.perf_counter()
-                    loss = gaussian_nll(
+                    loss, loss_components = gaussian_nll(
                         batch[columns.label],
                         pred_log_mean,
                         pred_log_var,
@@ -1302,6 +1341,11 @@ def main() -> int:
                         intensity_weight=args.intensity_loss_weight,
                         variance_parameterization=args.variance_parameterization,
                         min_variance=args.min_variance,
+                        log_variance_prior_centers=variance_prior_centers,
+                        log_variance_prior_weight=args.variance_prior_weight,
+                        beta_nll_beta=args.beta_nll_beta,
+                        faithful_mode=args.faithful_mode,
+                        return_components=True,
                     )
                     _raise_for_nonfinite_loss(
                         loss,
@@ -1378,6 +1422,10 @@ def main() -> int:
                     / max(1, train_batches),
                     "train_batch_mean_absolute_error": batch_mae,
                     "train_batch_mean_spectral_angle": batch_msa,
+                    **{
+                        f"train_batch_{name}": value.detach().item()
+                        for name, value in loss_components.items()
+                    },
                 }
                 if grad_norm is not None:
                     train_metrics["train_batch_grad_norm"] = grad_norm
@@ -1426,7 +1474,7 @@ def main() -> int:
                     batch = _cast_batch_types(batch, columns)
                     with _amp_autocast_context(device, amp_enabled, amp_dtype):
                         pred_log_mean, pred_log_var, pred_presence_logit = model(batch)
-                        val_loss = gaussian_nll(
+                        val_loss, val_loss_components = gaussian_nll(
                             batch[columns.label],
                             pred_log_mean,
                             pred_log_var,
@@ -1437,6 +1485,13 @@ def main() -> int:
                             intensity_weight=args.intensity_loss_weight,
                             variance_parameterization=args.variance_parameterization,
                             min_variance=args.min_variance,
+                            # The variance prior is a training regularizer, not
+                            # part of validation likelihood or model selection.
+                            log_variance_prior_centers=None,
+                            log_variance_prior_weight=0.0,
+                            beta_nll_beta=args.beta_nll_beta,
+                            faithful_mode=args.faithful_mode,
+                            return_components=True,
                         )
                     _raise_for_nonfinite_loss(
                         val_loss,
@@ -1479,6 +1534,10 @@ def main() -> int:
                         / max(1, val_batches),
                         "val_batch_mean_absolute_error": batch_mae,
                         "val_batch_mean_spectral_angle": batch_msa,
+                        **{
+                            f"val_batch_{name}": value.detach().item()
+                            for name, value in val_loss_components.items()
+                        },
                     }
                     val_metrics.update(batch_variance_stats)
                     global_step = _wandb_log(run, global_step, val_metrics)
@@ -1874,6 +1933,11 @@ def main() -> int:
                             intensity_weight=args.intensity_loss_weight,
                             variance_parameterization=args.variance_parameterization,
                             min_variance=args.min_variance,
+                            # Report the unregularized hurdle likelihood on test.
+                            log_variance_prior_centers=None,
+                            log_variance_prior_weight=0.0,
+                            beta_nll_beta=args.beta_nll_beta,
+                            faithful_mode=args.faithful_mode,
                         )
                     test_loss_total += test_loss.item()
                     test_batches += 1

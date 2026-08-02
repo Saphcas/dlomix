@@ -2,6 +2,7 @@ import numpy as np
 import torch
 from ..uncertainty_initialization import LOG_INTENSITY_EPSILON
 import torch.nn.functional as F
+from typing import Sequence
 
 
 def masked_spectral_distance(
@@ -215,12 +216,17 @@ def gaussian_nll(
     encoded_sequence: torch.Tensor,
     fragments_per_cleavage=None,
     has_termini: bool = True,
-    normalization: str = "per_peptide_component_mean",
+    normalization: str = "component_mean",
     presence_weight: float = 1.0,
     intensity_weight: float = 1.0,
     variance_parameterization: str = "log_var",
     min_variance: float = 1e-4,
-) -> torch.Tensor:
+    log_variance_prior_centers: Sequence[float] | torch.Tensor | None = None,
+    log_variance_prior_weight: float = 0.0,
+    beta_nll_beta: float = 0.0,
+    faithful_mode: str = "off",
+    return_components: bool = False,
+) -> torch.Tensor | tuple[torch.Tensor, dict[str, torch.Tensor]]:
     """
     Calculates a zero-inflated log-normal loss.
 
@@ -257,10 +263,11 @@ def gaussian_nll(
     has_termini : bool, optional
         Whether encoded sequences include N- and C-terminal tokens.
     normalization : {"component_mean", "per_peptide", "per_peptide_component_mean"}
-        ``per_peptide_component_mean`` is the default: it averages BCE over
-        valid ions and Gaussian NLL over present ions within each peptide, then
-        averages peptides. ``component_mean`` averages each component globally;
-        ``per_peptide`` averages the combined mixture loss within each peptide.
+        ``component_mean`` is the default: it averages BCE over valid ions and
+        Gaussian NLL over present ions across the batch.
+        ``per_peptide_component_mean`` averages each component within each
+        peptide before averaging peptides; ``per_peptide`` averages the
+        combined mixture loss within each peptide.
     presence_weight : float
         Weight applied to the Bernoulli/presence component.
     intensity_weight : float
@@ -271,6 +278,21 @@ def gaussian_nll(
         and computes ``sigma^2 = min_variance + softplus(raw)``.
     min_variance : float
         Positive variance floor used by ``softplus_variance``.
+    log_variance_prior_centers : sequence of float, optional
+        Channel-wise centers for a quadratic prior on predicted log variance.
+        Flattened targets are cleavage-major, so channel is
+        ``flat_index % fragments_per_cleavage``.
+    log_variance_prior_weight : float
+        Weight of the optional prior. A value of zero preserves the baseline.
+    beta_nll_beta : float
+        Optional beta-NLL exponent. Each Gaussian NLL is multiplied by
+        ``variance.detach() ** beta``; beta=0 exactly reproduces Gaussian NLL.
+    faithful_mode : {"off", "faithful_variance_only", "faithful_strict"}
+        Selects the architectural routing used by the model. When enabled, the
+        Gaussian objective is SSE plus NLL with the mean detached; the variance
+        head must receive a detached shared representation from the model.
+    return_components : bool
+        Return ``(total, {presence_loss, gaussian_loss, variance_prior_loss})``.
 
     Returns
     -------
@@ -291,6 +313,17 @@ def gaussian_nll(
         )
     if presence_weight < 0 or intensity_weight < 0:
         raise ValueError("Loss component weights must be non-negative.")
+    if log_variance_prior_weight < 0:
+        raise ValueError("log_variance_prior_weight must be non-negative.")
+    if beta_nll_beta < 0:
+        raise ValueError("beta_nll_beta must be non-negative.")
+    faithful_mode = str(faithful_mode).strip().lower()
+    if faithful_mode not in {"off", "faithful_variance_only", "faithful_strict"}:
+        raise ValueError(
+            "faithful_mode must be off, faithful_variance_only, or faithful_strict"
+        )
+    if faithful_mode != "off" and beta_nll_beta:
+        raise ValueError("faithful and beta-NLL are isolated experiment modes; enable only one.")
     if min_variance <= 0:
         raise ValueError("min_variance must be positive.")
 
@@ -306,6 +339,11 @@ def gaussian_nll(
     # y_true >= 0: remove -1 sentinels for impossible/unannotated ions. Combining
     # the two gives the domain k in b,y over which the mixture likelihood is
     # defined for this batch.
+    if fragments_per_cleavage is None:
+        fragments_per_cleavage = _infer_fragments_per_cleavage(
+            y_true, encoded_sequence, has_termini
+        )
+    fragments_per_cleavage = int(fragments_per_cleavage)
     possible = _possible_fragment_mask(
         y_true,
         encoded_sequence,
@@ -314,6 +352,19 @@ def gaussian_nll(
     )
     valid = possible & (y_true >= 0)
     present = valid & (y_true > 0)
+    prior_centers = None
+    if log_variance_prior_centers is not None:
+        prior_centers = torch.as_tensor(
+            log_variance_prior_centers, device=y_true.device, dtype=y_true.dtype
+        ).flatten()
+        if (
+            prior_centers.numel() != fragments_per_cleavage
+            or not torch.isfinite(prior_centers).all()
+        ):
+            raise ValueError(
+                "log_variance_prior_centers must contain one finite value per "
+                f"fragment channel ({fragments_per_cleavage})."
+            )
 
     if not torch.any(valid):
         raise ValueError(
@@ -341,11 +392,11 @@ def gaussian_nll(
         raise ValueError("Non-finite predicted presence logits in valid fragments.")
 
     if torch.any(present):
-        # The Gaussian term in the derivation is over log(y_k + eps), not raw
-        # intensity. Therefore the mean head is mu_k in log-intensity space.
+        # The Gaussian term is over log(y_k + eps), not raw intensity.
         log_target = torch.log(y_true[present] + epsilon)
         variance_head = y_log_var_pred[present]
-        squared_error = torch.square(log_target - y_log_mean_pred[present])
+        mean_values = y_log_mean_pred[present]
+        squared_error = torch.square(log_target - mean_values)
         log_two_pi = torch.log(
             torch.tensor(
                 2.0 * np.pi,
@@ -355,66 +406,119 @@ def gaussian_nll(
         )
 
         if variance_parameterization == "log_var":
-            # Preserve the original baseline arithmetic: exp(-s) * error^2,
-            # where the head predicts s = log(sigma^2).
+            # The head predicts s = log(sigma^2).
             log_variance = variance_head
+            variance = torch.exp(log_variance)
             scaled_squared_error = torch.exp(-log_variance) * squared_error
         else:
-            # Experimental parameterization: the head is unconstrained, while
-            # the positive variance and its floor are enforced inside the loss.
             variance = float(min_variance) + F.softplus(variance_head)
             log_variance = torch.log(variance)
             scaled_squared_error = squared_error / variance
 
-        intensity_per_ion_values = 0.5 * (
+        standard_gaussian_per_ion = 0.5 * (
             scaled_squared_error + log_variance + log_two_pi
         )
+        if faithful_mode != "off":
+            # Faithful Heteroscedastic Regression: the mean/trunk receives the
+            # SSE gradient, while the variance head receives NLL gradients from
+            # a mean-detached residual. The model routes its variance head from
+            # x.detach(), preventing those NLL gradients reaching the trunk.
+            detached_squared_error = torch.square(log_target - mean_values.detach())
+            if variance_parameterization == "log_var":
+                # Retain the baseline log-variance arithmetic. Forming
+                # exp(log_variance) first can underflow before division.
+                detached_scaled_squared_error = (
+                    torch.exp(-log_variance) * detached_squared_error
+                )
+            else:
+                detached_scaled_squared_error = detached_squared_error / variance
+            faithful_variance_nll = 0.5 * (
+                detached_scaled_squared_error + log_variance + log_two_pi
+            )
+            gaussian_per_ion_values = 0.5 * squared_error + faithful_variance_nll
+        elif beta_nll_beta:
+            # beta-NLL is restricted to positive-ion Gaussian NLL values. The
+            # factor is detached, so it reweights samples but does not create a
+            # direct incentive to alter the predicted variance.
+            beta_weight = variance.detach().pow(beta_nll_beta)
+            gaussian_per_ion_values = beta_weight * standard_gaussian_per_ion
+        else:
+            gaussian_per_ion_values = standard_gaussian_per_ion
     else:
-        # The Gaussian sum over {k: y_k > 0} is an empty sum. The batch still
-        # trains through its Bernoulli absence terms.
-        intensity_per_ion_values = y_log_mean_pred[present] * 0.0
+        gaussian_per_ion_values = y_log_mean_pred[present] * 0.0
 
     presence_values = presence_per_ion[valid]
-    intensity_per_ion = torch.zeros_like(y_true)
-    intensity_per_ion[present] = intensity_per_ion_values
+    gaussian_per_ion = torch.zeros_like(y_true)
+    gaussian_per_ion[present] = gaussian_per_ion_values
 
     if normalization == "component_mean":
-        # Give BCE and positive-ion Gaussian NLL stable, explicit scales.
         presence_loss = presence_values.mean()
         intensity_loss = (
-            intensity_per_ion_values.mean()
+            gaussian_per_ion_values.mean()
             if torch.any(present)
             else y_log_mean_pred.sum() * 0.0
         )
     elif normalization == "per_peptide":
-        # Each peptide contributes one averaged combined loss, regardless of its
-        # number of theoretical ions. This targets an average per-PSM objective.
         valid_count_per_peptide = valid.sum(dim=1).clamp_min(1).to(y_true.dtype)
         presence_loss = (
             presence_per_ion.masked_fill(~valid, 0.0).sum(dim=1)
             / valid_count_per_peptide
         ).mean()
         intensity_loss = (
-            intensity_per_ion.sum(dim=1) / valid_count_per_peptide
+            gaussian_per_ion.sum(dim=1) / valid_count_per_peptide
         ).mean()
     else:
-        # Average each observed component within each peptide separately. The
-        # Gaussian denominator is the number of present ions, so sparse peptides
-        # do not silently reduce the relative intensity-head contribution.
         valid_count_per_peptide = valid.sum(dim=1).clamp_min(1).to(y_true.dtype)
         present_count_per_peptide = present.sum(dim=1)
         presence_loss = (
             presence_per_ion.masked_fill(~valid, 0.0).sum(dim=1)
             / valid_count_per_peptide
         ).mean()
-        intensity_sum_per_peptide = intensity_per_ion.sum(dim=1)
+        gaussian_sum_per_peptide = gaussian_per_ion.sum(dim=1)
         has_present = present_count_per_peptide > 0
         if torch.any(has_present):
             intensity_loss = (
-                intensity_sum_per_peptide[has_present]
+                gaussian_sum_per_peptide[has_present]
                 / present_count_per_peptide[has_present].to(y_true.dtype)
             ).mean()
         else:
             intensity_loss = y_log_mean_pred.sum() * 0.0
 
-    return presence_weight * presence_loss + intensity_weight * intensity_loss
+    if torch.any(present) and prior_centers is not None and log_variance_prior_weight:
+        channel_indices = torch.nonzero(present, as_tuple=False)[:, 1] % fragments_per_cleavage
+        prior_values = torch.square(log_variance - prior_centers[channel_indices])
+        prior_per_ion = torch.zeros_like(y_true)
+        prior_per_ion[present] = prior_values
+        if normalization == "component_mean":
+            variance_prior_loss = prior_values.mean()
+        elif normalization == "per_peptide":
+            valid_count_per_peptide = valid.sum(dim=1).clamp_min(1).to(y_true.dtype)
+            variance_prior_loss = (
+                prior_per_ion.sum(dim=1) / valid_count_per_peptide
+            ).mean()
+        else:
+            present_count_per_peptide = present.sum(dim=1)
+            has_present = present_count_per_peptide > 0
+            if torch.any(has_present):
+                variance_prior_loss = (
+                    prior_per_ion.sum(dim=1)[has_present]
+                    / present_count_per_peptide[has_present].to(y_true.dtype)
+                ).mean()
+            else:
+                variance_prior_loss = y_log_mean_pred.sum() * 0.0
+    else:
+        variance_prior_loss = y_log_mean_pred.sum() * 0.0
+
+    total_loss = (
+        presence_weight * presence_loss
+        + intensity_weight * intensity_loss
+        + log_variance_prior_weight * variance_prior_loss
+    )
+    if return_components:
+        return total_loss, {
+            "presence_loss": presence_loss,
+            "gaussian_loss": intensity_loss,
+            "variance_prior_loss": variance_prior_loss,
+            "total_loss": total_loss,
+        }
+    return total_loss

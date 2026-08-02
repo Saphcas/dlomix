@@ -140,6 +140,13 @@ def _load_values(stats_path: str | Path, key: str, count: int) -> np.ndarray:
     return values_array
 
 
+def load_log_variance_prior_centers(
+    stats_path: str | Path, channel_count: int = _HEAD_COUNT
+) -> np.ndarray:
+    """Load one residual log-variance prior center per fragment channel."""
+    return _load_values(stats_path, "log_variance_prior_centers", int(channel_count))
+
+
 def _output_bias(model: torch.nn.Module, head_name: str) -> torch.nn.Parameter:
     head = getattr(model, head_name, None)
     output_dense = getattr(head, "output_dense", None)
