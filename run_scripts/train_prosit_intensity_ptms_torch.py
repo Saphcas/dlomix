@@ -57,8 +57,11 @@ os.environ.setdefault("HF_DATASETS_CACHE", str(hf_datasets_cache))
 os.environ.setdefault("HF_HUB_CACHE", str(hf_hub_cache))
 
 data_root = Path(os.environ.get("DATA_HOME", str(DATA_ROOT))).expanduser()
-data_location = Path(os.environ.get("DATA_LOCATION", str(data_root / "data"))
-).expanduser()
+data_location = Path(os.environ.get("DATA_LOCATION", str(data_root / "data"))).expanduser()
+
+train_data = Path(os.environ.get("TRAIN_LOCATION", str(data_location / "all_train_ptms_fixed_na.parquet"))).expanduser()
+val_data = Path(os.environ.get("VAL_LOCATION", str(data_location / "all_val_ptms_fixed_na.parquet"))).expanduser()
+test_data = Path(os.environ.get("TEST_LOCATION", str(data_location / "test.parquet"))).expanduser()
 
 
 def _env_bool(name: str, default: bool) -> bool:
@@ -89,9 +92,9 @@ from dlomix.models import PrositIntensityPredictor, PrositIntensityUncertaintyPr
 CONFIG = {
     # --- Model Settings ---
     # Path within container, remember to define the path names when creating the image
-    "train": f"{str(data_location)}/all_train_ptms_fixed_na.parquet",
-    "val": f"{str(data_location)}/all_val_ptms_fixed_na.parquet",
-    "test": f"{str(data_location)}/test.parquet",
+    "train": str(train_data),
+    "val": str(val_data),
+    "test": str(test_data),
     # Bool for model selection, false will use the current Prosit standard of masked spectral distance
     "uncertainty_aware": _env_bool("UNCERTAINTY_AWARE", True),
     # --- Training loop (evidence: `run_scripts/run_prosit_intensity_torch.py`,

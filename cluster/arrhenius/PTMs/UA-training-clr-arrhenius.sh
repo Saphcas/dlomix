@@ -2,7 +2,7 @@
 #SBATCH -A naiss2026-3-479-gpu -p gpu --gpus=1
 #SBATCH -t 42:00:00
 #SBATCH --signal=B:TERM@120
-#SBATCH -J dlomix-ua-warmup-cosine-train
+#SBATCH -J dlomix-ptm-ua-clr-train
 #SBATCH -o /nobackup/proj/disk/kall/personal/%u/logs/%x-%j.out
 
 set -Eeuo pipefail
@@ -17,11 +17,13 @@ export HF_HUB_CACHE=$TMPDIR/.hf/hub
 export HF_DATASETS_CACHE=$TMPDIR/.hf/datasets
 export TRANSFORMERS_CACHE=$TMPDIR/.hf/transformers
 
-export LR_SCHEDULE=warmup_cosine
+export LR_SCHEDULE=clr
 
-export WARMUP_COSINE_START_LR=1.6e-5
-export WARMUP_COSINE_PEAK_LR=1.2e-4
-export WARMUP_COSINE_MIN_LR=1.6e-5
+export USE_CLR=True
+export CLR_BASE_LR=1e-5
+export CLR_MAX_LR=4e-4
+
+export LEARNING_RATE=2e-4
 
 export NUM_WORKERS=16
 export BATCH_SIZE=1024
@@ -29,7 +31,10 @@ export N_EPOCHS=120
 export DLOMIX_BACKEND=pytorch
 export UNCERTAINTY_AWARE=True
 
-export DATA_LOCATION=$TMPDIR/PTMs_Train
+export TRAIN_LOCATION=$TMPDIR/PTMs_Train/all_train_ptms_fixed_na.parquet
+export VAL_LOCATION=$TMPDIR/PTMs_Train/all_val_ptms_fixed_na.parquet
+export TEST_LOCATION=$TMPDIR/PTMs_Train/test.parquet
+
 export CHECKPOINT_DIR=$TMPDIR/"$SLURM_JOB_NAME"_"$SLURM_JOB_ID"_checkpoints
 export WANDB_NAME="$SLURM_JOB_NAME"_"$SLURM_JOB_ID"
 
