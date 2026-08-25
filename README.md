@@ -1,3 +1,6 @@
+# Deprecated dlomix clone
+This repository is an artifact of a private repository made public, in order to follow best practice changes were linked to a fork of the dlomix repository. This repository is kept available as to keep the record of the work done before the official fork linking. For the current repository see [dlomix-uncertainty-aware](https://github.com/Saphcas/dlomix-uncertainty-aware).
+
 # DLOmix
 
 [![Docs](https://readthedocs.org/projects/dlomix/badge/?version=stable)](https://dlomix.readthedocs.io/en/stable/?badge=stable)
